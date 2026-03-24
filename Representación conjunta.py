@@ -3,12 +3,12 @@ import matplotlib.pyplot as plt
 from scipy.signal import decimate
 
 # Ruta de archivos para el Sujeto 3F
-ECG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Biopac data\ECG\Subject3F_ECG.py"
-EDA = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Biopac data\EDA\Subject3F_EDA.py"
-EMG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Biopac data\EMG\Subject3F_EMG.py"
-PPG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Biopac data\PPG\Subject3F_PPG.py"
-RESP = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Biopac data\RESP\Subject3F_RESP.py"
-SKT = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Biopac data\SKT\Subject3F_SKT.py"
+ECG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_ECG.csv"
+EDA = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_EDA.csv"
+EMG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_EMG.csv"
+PPG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_PPG.csv"
+RESP = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_RESP.csv"
+SKT = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_SKT.csv"
 
 # Cargar señales
 sECG = np.loadtxt(ECG)
@@ -63,6 +63,15 @@ fig.suptitle("Representación de Gráficas Simultáneas", fontsize=14)
 
 #se ajusta el tamaño de la representación
 l=1
+
+# Intervalos (en segundos)
+intervals = [
+    (0,2607-120-964-120-964, 'White', 'No music'),
+    (2607-120-964-120-964, 2607-120-964-120, 'green', 'Calming music'),
+    (2607-120-964-120, 2607-964-120, 'blue', 'Relax'),
+    (2607-964-120, 2607-120, 'red', 'Vexing music'),
+    (2607-120, 2607, 'blue', 'Relax')
+]
 # Gráfica 1
 axs[0].plot(tECG[:len(tECG)//l], sECG[:len(tECG)//l])
 axs[0].set_title("Señal de Electrocardiograma")
@@ -93,5 +102,26 @@ axs[5].plot(tSKT[:len(tSKT)//l], sSKT[:len(tSKT)//l])
 axs[5].set_title("Señal de Temperatura Cutánea")
 axs[5].grid(True)
 
+# Pintar el fondo
+for start, end, color, label in intervals:
+    axs[0].axvspan(start, end, color=color, alpha=0.2, label=label)
+    axs[1].axvspan(start, end, color=color, alpha=0.2, label=label)
+    axs[2].axvspan(start, end, color=color, alpha=0.2, label=label)
+    axs[3].axvspan(start, end, color=color, alpha=0.2, label=label)
+    axs[4].axvspan(start, end, color=color, alpha=0.2, label=label)
+    axs[5].axvspan(start, end, color=color, alpha=0.2, label=label)
+
+# Evitar duplicados en la leyenda
+handles, labels = axs[0].get_legend_handles_labels()
+unique = dict(zip(labels, handles))
+
+
+# IMPORTANTE: fijar posición (rápido)
+fig.legend(unique.values(), unique.keys(), loc='upper left', bbox_to_anchor=(0.01, 0.99))  # ajuste fino (x, y))
+
 plt.subplots_adjust(hspace=0.9)
 plt.show()
+
+#Representamos valor máximo en el eje temporal
+#t_max = tECG[-1]
+#print("Tiempo máximo (s):", t_max) Resultado = 2607 segundos
