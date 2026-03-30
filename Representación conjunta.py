@@ -3,12 +3,12 @@ import matplotlib.pyplot as plt
 from scipy.signal import decimate
 
 # Ruta de archivos para el Sujeto 3F
-ECG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_ECG.csv"
-EDA = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_EDA.csv"
-EMG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_EMG.csv"
-PPG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_PPG.csv"
-RESP = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_RESP.csv"
-SKT = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_SKT.csv"
+ECG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto5\Biopac data\Subject11F_ECG.csv"
+EDA = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto5\Biopac data\Subject11F_EDA.csv"
+EMG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto5\Biopac data\Subject11F_EMG.csv"
+PPG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto5\Biopac data\Subject11F_PPG.csv"
+RESP = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto5\Biopac data\Subject11F_RESP.csv"
+SKT = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto5\Biopac data\Subject11F_SKT.csv"
 
 # Cargar señales
 sECG = np.loadtxt(ECG)
@@ -66,11 +66,12 @@ l=1
 
 # Intervalos (en segundos)
 intervals = [
-    (0,2607-120-964-120-964, 'White', 'No music'),
-    (2607-120-964-120-964, 2607-120-964-120, 'green', 'Calming music'),
-    (2607-120-964-120, 2607-964-120, 'blue', 'Relax'),
-    (2607-964-120, 2607-120, 'red', 'Vexing music'),
-    (2607-120, 2607, 'blue', 'Relax')
+    (0,1498-120-964, 'White', 'No music'),
+    (1498-120-964, 1498-120, 'green', 'Calming music'),
+    (1498-120, 1498, 'blue', 'Relax'),
+    (1498, 1498+964, 'red', 'Vexing music'),
+    (1498+964, 1498+964+120, 'blue', 'Relax'),
+    (1498+964+120, 2607, 'White', 'No music')
 ]
 # Gráfica 1
 axs[0].plot(tECG[:len(tECG)//l], sECG[:len(tECG)//l])
