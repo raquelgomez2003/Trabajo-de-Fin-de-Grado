@@ -2,7 +2,7 @@ import csv
 import os
 
 # Carpeta raíz (la que tú pasas)
-carpeta_entrada = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base3_Sujeto5"
+carpeta_entrada = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base3_Sujeto6"
 
 # Recorrer todas las subcarpetas y archivos
 for root, dirs, files in os.walk(carpeta_entrada):
