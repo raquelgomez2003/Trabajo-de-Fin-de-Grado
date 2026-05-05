@@ -3,23 +3,23 @@ import matplotlib.pyplot as plt
 from scipy.signal import decimate
 
 # Ruta de archivos para el Sujeto 3F
-#ACC = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Empatica_data\Subject3F_ACC.csv"
-BVP = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Empatica_data\Subject3F_BVP.csv"
-EDA = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Empatica_data\Subject3F_EDA.csv"
-HR = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Empatica_data\Subject3F_HR.csv"
-#IBI = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Empatica_data\Subject3F_IBI.csv"
-TEMP = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Empatica_data\Subject3F_TEMP.csv"
+ECG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_ECG.csv"
+EDA = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_EDA.csv"
+EMG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_EMG.csv"
+PPG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_PPG.csv"
+RESP = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_RESP.csv"
+SKT = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_SKT.csv"
 
 # Cargar señales
-#sACC = np.loadtxt(ACC)
-sBVP = np.loadtxt(BVP)
+sECG = np.loadtxt(ECG)
 sEDA = np.loadtxt(EDA)
-sHR = np.loadtxt(HR)
-#sIBI = np.loadtxt(IBI)
-sTEMP = np.loadtxt(TEMP)
+sEMG = np.loadtxt(EMG)
+sPPG = np.loadtxt(PPG)
+sRESP = np.loadtxt(RESP)
+sSKT = np.loadtxt(SKT)
 
 # Frecuencia de muestreo original
-fs = 4
+fs = 2000
 
 # Diezmado
 #no se hace diezmado y = decimate(x,4)
@@ -28,12 +28,12 @@ fs = 4
 # no cambia, al no hacer diezmado fs_nueva = fs /4 #pasa a ser 500Hz
 
 # Eje temporal  
-#tACC = np.arange(len(sACC)) / fs
-tBVP = np.arange(len(sBVP)) / fs
+tECG = np.arange(len(sECG)) / fs
 tEDA = np.arange(len(sEDA)) / fs
-tHR = np.arange(len(sHR)) / fs
-#tIBI = np.arange(len(sIBI)) / fs
-tTEMP = np.arange(len(sTEMP)) / fs
+tEMG = np.arange(len(sEMG)) / fs
+tPPG = np.arange(len(sPPG)) / fs
+tRESP = np.arange(len(sRESP)) / fs
+tSKT = np.arange(len(sSKT)) / fs
 
 # Representar todas las señales en la misma gráfica
 #plt.plot(tECG, sECG, label="Señal de Electrocardiograma")
@@ -65,42 +65,46 @@ fig.suptitle("Representación de Gráficas Simultáneas", fontsize=14)
 l=1
 
 # Intervalos (en segundos)
+
+ #Sujeto 1 (3F) ->  inicio calming 502.35 (usando MIN)
+                    #fin calming 1469.1 (usando MAX)
+                    #inicio vexing 1612,88
+                    #fin vexing 2578,67
 intervals = [
-    (0,1498-120-964, 'White', 'No music'),
-    (1498-120-964, 1498-120, 'green', 'Calming music'),
-    (1498-120, 1498, 'blue', 'Relax'),
-    (1498, 1498+964, 'red', 'Vexing music'),
-    (1498+964, 1498+964+120, 'blue', 'Relax'),
-    (1498+964+120, 2607, 'White', 'No music')
+    (0,502, 'White', 'No music'),
+    (502, 1469, 'green', 'Calming music'),
+    (1469, 1612, 'blue', 'Relax'),
+    (1612, 2578, 'red', 'Vexing music'),
+    (2578, 2721, 'blue', 'Relax'),
 ]
 # Gráfica 1
-#axs[0].plot(tACC[:len(tACC)//l], sACC[:len(tACC)//l])
-#axs[0].set_title("Señal de ACC")
-#axs[0].grid(True)
+axs[0].plot(tECG[:len(tECG)//l], sECG[:len(tECG)//l])
+axs[0].set_title("Señal de ECGG")
+axs[0].grid(True)
 
 # Gráfica 2
-axs[1].plot(tBVP[:len(tBVP)//l], sBVP[:len(tBVP)//l])
-axs[1].set_title("Señal de BVP")
+axs[1].scatter(tEDA[:len(tEDA)//l], sEDA[:len(tEDA)//l])
+axs[1].set_title("Señal de EDA")
 axs[1].grid(True)
 
 # Gráfica 3
-axs[2].scatter(tEDA[:len(tEDA)//l], sEDA[:len(tEDA)//l])
-axs[2].set_title("Señal de EDA")
+axs[2].scatter(tEMG[:len(tEMG)//l], sEMG[:len(tEMG)//l])
+axs[2].set_title("Señal de EMG")
 axs[2].grid(True)
 
 # Gráfica 4
-axs[3].plot(tHR[:len(tHR)//l], sHR[:len(tHR)//l])
-axs[3].set_title("Señal de HR")
+axs[3].plot(tPPG[:len(tPPG)//l], sPPG[:len(tPPG)//l])
+axs[3].set_title("Señal de PPG")
 axs[3].grid(True)
 
 # Gráfica 5
-#axs[4].plot(tIBI[:len(tIBI)//l], sIBI[:len(tIBI)//l])
-#axs[4].set_title("Señal de IBI")
-#axs[4].grid(True)
+axs[4].plot(tRESP[:len(tRESP)//l], sRESP[:len(tRESP)//l])
+axs[4].set_title("Señal de RESP")
+axs[4].grid(True)
 
 # Gráfica 6
-axs[5].plot(tTEMP[:len(tTEMP)//l], sTEMP[:len(tTEMP)//l])
-axs[5].set_title("Señal de TEMP")
+axs[5].plot(tSKT[:len(tSKT)//l], sSKT[:len(tSKT)//l])
+axs[5].set_title("Señal de SKT")
 axs[5].grid(True)
 
 # Pintar el fondo
