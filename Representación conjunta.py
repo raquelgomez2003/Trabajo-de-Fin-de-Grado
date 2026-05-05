@@ -3,12 +3,12 @@ import matplotlib.pyplot as plt
 from scipy.signal import decimate
 
 # Ruta de archivos para el Sujeto 3F
-ECG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_ECG.csv"
-EDA = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_EDA.csv"
-EMG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_EMG.csv"
-PPG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_PPG.csv"
-RESP = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_RESP.csv"
-SKT = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto1\Biopac data\Subject3F_SKT.csv"
+ECG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto4\Biopac data\Subject8M_ECG.csv"
+EDA = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto4\Biopac data\Subject8M_EDA.csv"
+EMG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto4\Biopac data\Subject8M_EMG.csv"
+PPG = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto4\Biopac data\Subject8M_PPG.csv"
+RESP = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto4\Biopac data\Subject8M_RESP.csv"
+SKT = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1_Sujeto4\Biopac data\Subject8M_SKT.csv"
 
 # Cargar señales
 sECG = np.loadtxt(ECG)
@@ -71,15 +71,15 @@ l=1
                     #inicio vexing 1612,88
                     #fin vexing 2578,67
 intervals = [
-    (0,502, 'White', 'No music'),
-    (502, 1469, 'green', 'Calming music'),
-    (1469, 1612, 'blue', 'Relax'),
-    (1612, 2578, 'red', 'Vexing music'),
-    (2578, 2721, 'blue', 'Relax'),
+    (0, 582, 'White', 'No music'),
+    (582, 1504, 'green', 'Calming music'),
+    (1504, 1689, 'blue', 'Relax'),
+    (1689, 2641, 'red', 'Vexing music')
 ]
+
 # Gráfica 1
 axs[0].plot(tECG[:len(tECG)//l], sECG[:len(tECG)//l])
-axs[0].set_title("Señal de ECGG")
+axs[0].set_title("Señal de ECG")
 axs[0].grid(True)
 
 # Gráfica 2

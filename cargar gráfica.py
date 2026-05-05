@@ -1,138 +1,163 @@
 import customtkinter as ctk
-from tkinter import filedialog, messagebox
 import numpy as np
+import os
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from tkinter import messagebox
 
-# Configuración de la ventana
+# -----------------------------
+# CONFIG
+# -----------------------------
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
 
 root = ctk.CTk()
-root.geometry("1000x700")
-root.title("Visualización de Señal Seleccionada")
+root.geometry("1100x700")
+root.title("Visor Biomédico")
 
-# Variables globales
-sECG = None
-fs = None
-canvas = None  # Para poder destruir la gráfica anterior
+BASE_PATH = r"C:\Users\raque\Desktop\TFG\base de datos TFG"
 
-# Función para cargar el archivo
-def cargar_archivo():
-    global sECG
-    file_path = filedialog.askopenfilename(filetypes=[("Python files", "*.py"),("Python files", "*.csv")])
-    if file_path:
-        try:
-            sECG = np.loadtxt(file_path)
-            messagebox.showinfo("Archivo cargado", f"Se cargó correctamente: {file_path}")
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo leer el archivo:\n{e}")
+senales = {}
+senal_actual = None
+canvas = None
 
-# Función para graficar la señal
+# -----------------------------
+# DETECTAR POR NOMBRE
+# -----------------------------
+def detectar_tipo(nombre):
+    nombre = nombre.upper()
+
+    if "ECG" in nombre: return "ECG"
+    if "EDA" in nombre: return "EDA"
+    if "EMG" in nombre: return "EMG"
+    if "PPG" in nombre: return "PPG"
+    if "RESP" in nombre: return "RESP"
+    if "SKT" in nombre: return "SKT"
+
+    return None
+
+# -----------------------------
+# CARGAR SUJETO
+# -----------------------------
+def cargar_sujeto(num):
+    global senales
+
+    senales = {}
+
+    ruta = os.path.join(BASE_PATH, f"Base1_Sujeto{num}", "Biopac data")
+
+    if not os.path.exists(ruta):
+        messagebox.showerror("Error", f"No existe:\n{ruta}")
+        return
+
+    for archivo in os.listdir(ruta):
+        if archivo.endswith(".csv"):
+            tipo = detectar_tipo(archivo)
+
+            if tipo:
+                ruta_archivo = os.path.join(ruta, archivo)
+
+                try:
+                    data = np.loadtxt(ruta_archivo, delimiter=",", skiprows=1)
+                    senales[tipo] = data
+                except:
+                    print(f"Error leyendo {archivo}")
+
+    actualizar_botones_senales()
+
+# -----------------------------
+# BOTONES DE SEÑALES
+# -----------------------------
+def actualizar_botones_senales():
+    for widget in frame_senales.winfo_children():
+        widget.destroy()
+
+    for tipo in senales.keys():
+        btn = ctk.CTkButton(
+            frame_senales,
+            text=tipo,
+            command=lambda t=tipo: seleccionar_senal(t)
+        )
+        btn.pack(pady=5, fill="x")
+
+# -----------------------------
+# SELECCIONAR SEÑAL
+# -----------------------------
+def seleccionar_senal(tipo):
+    global senal_actual
+    senal_actual = tipo
+    graficar()
+
+# -----------------------------
+# GRAFICAR
+# -----------------------------
 def graficar():
-    global sECG, fs, canvas
-    if sECG is None:
-        messagebox.showwarning("Atención", "Primero cargue un archivo de señal.")
+    global canvas
+
+    if senal_actual is None:
         return
 
     try:
-        fs_usuario = float(entry_fs.get())
-        inicio_min = float(entry_inicio.get())
-        fin_min = float(entry_fin.get())
+        fs = float(entry_fs.get())
     except:
-        messagebox.showwarning("Atención", "Ingrese valores numéricos válidos.")
+        messagebox.showwarning("Error", "Frecuencia inválida")
         return
 
-    # Convertir minutos a índices
-    inicio_idx = int(inicio_min * 60 * fs_usuario)
-    fin_idx = int(fin_min * 60 * fs_usuario)
-    if inicio_idx < 0: inicio_idx = 0
-    if fin_idx > len(sECG): fin_idx = len(sECG)
-    if inicio_idx >= fin_idx:
-        messagebox.showwarning("Atención", "El inicio debe ser menor que el fin.")
-        return
+    signal = senales[senal_actual]
+    t = np.arange(len(signal)) / fs
 
-    sECG_seccion = sECG[inicio_idx:fin_idx]
-
-    # Diezmado si fs diferente de 2000 Hz
-    if fs_usuario != 2000:
-        factor = int(fs_usuario / 2000)
-        if factor < 1:
-            factor = 1
-        sECG_seccion = sECG_seccion[::factor]
-        fs_final = fs_usuario / factor
-    else:
-        fs_final = fs_usuario
-
-    tECG = np.arange(len(sECG_seccion)) / fs_final
-
-    # Limpiar gráfica anterior si existe
     if canvas:
         canvas.get_tk_widget().destroy()
 
-    # Crear figura de Matplotlib
-    fig, ax = plt.subplots(figsize=(6,3))
-    ax.plot(tECG, sECG_seccion * 1000)  # Convertir a mV
+    fig, ax = plt.subplots(figsize=(7,3))
+    ax.plot(t, signal)
+    ax.set_title(senal_actual)
     ax.set_xlabel("Tiempo (s)")
-    ax.set_ylabel("Amplitud (mV)")
-    ax.set_title("Señal ECG")
-    ax.grid(True)
+    ax.grid()
 
-    # Integrar en Tkinter
-    canvas = FigureCanvasTkAgg(fig, master=root)
+    canvas = FigureCanvasTkAgg(fig, master=frame_grafica)
     canvas.draw()
-    canvas.get_tk_widget().pack(pady=20)
+    canvas.get_tk_widget().pack()
 
-# Función para eliminar la señal y la gráfica
-def eliminar_senal():
-    global canvas, sECG
-    if canvas:
-        canvas.get_tk_widget().destroy()
-        canvas = None
-    sECG = None
-    entry_fs.delete(0, "end")
-    entry_inicio.delete(0, "end")
-    entry_fin.delete(0, "end")
-    messagebox.showinfo("Eliminado", "Señal y gráfica eliminadas. Puede subir un nuevo archivo.")
+# -----------------------------
+# INTERFAZ
+# -----------------------------
 
-# Función para cerrar todo el programa sin errores
-def cerrar_programa():
-    global canvas
-    if canvas:
-        canvas.get_tk_widget().destroy()
-    root.destroy()  # Cierra todo inmediatamente
+# PANEL IZQUIERDO (SUJETOS)
+frame_izq = ctk.CTkFrame(root, width=200)
+frame_izq.pack(side="left", fill="y", padx=10, pady=10)
 
-# Botones y entradas
-btn_cargar = ctk.CTkButton(root, text="Cargar Archivo", command=cargar_archivo)
-btn_cargar.pack(pady=10)
+ctk.CTkLabel(frame_izq, text="Sujetos", font=("Arial", 16)).pack(pady=10)
 
-ctk.CTkLabel(root, text="Frecuencia de muestreo (Hz):").pack()
-entry_fs = ctk.CTkEntry(root)
+for i in range(1, 6):
+    btn = ctk.CTkButton(
+        frame_izq,
+        text=f"Sujeto {i}",
+        command=lambda n=i: cargar_sujeto(n)
+    )
+    btn.pack(pady=5, fill="x")
+
+# PANEL CENTRAL (SEÑALES)
+frame_senales = ctk.CTkFrame(root, width=200)
+frame_senales.pack(side="left", fill="y", padx=10, pady=10)
+
+ctk.CTkLabel(frame_senales, text="Señales", font=("Arial", 16)).pack(pady=10)
+
+# PANEL DERECHO (GRÁFICA)
+frame_der = ctk.CTkFrame(root)
+frame_der.pack(side="right", expand=True, fill="both", padx=10, pady=10)
+
+ctk.CTkLabel(frame_der, text="Frecuencia de muestreo (Hz)").pack()
+entry_fs = ctk.CTkEntry(frame_der)
 entry_fs.pack(pady=5)
 
-# Entradas para sección en minutos
-ctk.CTkLabel(root, text="Sección a representar (minutos):").pack(pady=(10,0))
-frame_tiempo = ctk.CTkFrame(root)
-frame_tiempo.pack(pady=5)
+btn_plot = ctk.CTkButton(frame_der, text="Graficar", command=graficar)
+btn_plot.pack(pady=10)
 
-ctk.CTkLabel(frame_tiempo, text="Inicio:").grid(row=0, column=0, padx=5)
-entry_inicio = ctk.CTkEntry(frame_tiempo, width=50)
-entry_inicio.grid(row=0, column=1, padx=5)
+frame_grafica = ctk.CTkFrame(frame_der)
+frame_grafica.pack(expand=True, fill="both", pady=10)
 
-ctk.CTkLabel(frame_tiempo, text="Fin:").grid(row=0, column=2, padx=5)
-entry_fin = ctk.CTkEntry(frame_tiempo, width=50)
-entry_fin.grid(row=0, column=3, padx=5)
-
-btn_graficar = ctk.CTkButton(root, text="Graficar Señal", command=graficar)
-btn_graficar.pack(pady=10)
-
-btn_eliminar = ctk.CTkButton(root, text="Eliminar Señal/Gráfica", command=eliminar_senal)
-btn_eliminar.pack(pady=10)
-
-btn_salir = ctk.CTkButton(root, text="Salir", command=cerrar_programa)
-btn_salir.pack(pady=20)
-
-# Asociar la acción de cerrar ventana con nuestra función segura
-root.protocol("WM_DELETE_WINDOW", cerrar_programa)
+# Cerrar
+root.protocol("WM_DELETE_WINDOW", root.destroy)
 
 root.mainloop()
