@@ -15,7 +15,8 @@ from sklearn.preprocessing import StandardScaler
 
 from app.core.models import (
     StressModel, extract_features_windowed,
-    build_labels, FEATURE_NAMES,
+    build_labels_from_intervals, build_physiological_labels,
+    FEATURE_NAMES, FEATURE_DIM,
 )
 from app.core.config import RF_WINDOW_SEC, RF_STEP_SEC
 from app.core.plotter import plot_boxplots, plot_roc
@@ -48,10 +49,12 @@ class AnalysisWindow(ctk.CTkFrame):
         calming_intervals: list[tuple[float, float]],
     ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         """
-        Train a StressModel per signal, plot boxplots + ROC.
-        Returns stress_map: {signal_name: (t_centers, predictions)} for viewer.
+        1. Derive stress labels from physiology (BPM, EDA, RESP, etc.) via majority vote.
+        2. Train one RandomForest per signal using those physiological labels.
+        3. Generate boxplots (features split by session phase) and ROC curves
+           (physiological predictions vs session-interval ground truth).
+        Returns stress_map: {signal_name: (t_centers, predictions)} for the viewer.
         """
-        # Clear previous content
         for w in self.winfo_children():
             w.destroy()
         for fig in self._figs:
@@ -62,9 +65,13 @@ class AnalysisWindow(ctk.CTkFrame):
             self._build_placeholder()
             return {}
 
-        # Outer layout: progress label + tabview
         ctk.CTkLabel(self, text="Analysis Results",
                      font=("Arial", 14, "bold")).pack(pady=(10, 4))
+
+        # ── Step 1: physiological labels (cross-signal majority vote) ──────
+        t_phys, y_phys = build_physiological_labels(
+            signals, fs_map, RF_WINDOW_SEC, RF_STEP_SEC
+        )
 
         tab_view = ctk.CTkTabview(self)
         tab_view.pack(fill="both", expand=True, padx=8, pady=8)
@@ -74,47 +81,55 @@ class AnalysisWindow(ctk.CTkFrame):
         for sig_name, signal in signals.items():
             fs = fs_map.get(sig_name, 2000)
 
-            # ── Feature extraction ──────────────────────────────────────────
+            # ── Per-signal feature matrix ───────────────────────────────────
             X_all, t_centers = extract_features_windowed(
-                signal, fs, RF_WINDOW_SEC, RF_STEP_SEC
+                signal, fs, sig_name, RF_WINDOW_SEC, RF_STEP_SEC
             )
             if len(X_all) == 0:
                 continue
 
-            y_all = build_labels(t_centers, stress_intervals)
+            # ── Align physiological labels to this signal's windows ─────────
+            n_win = min(len(X_all), len(t_phys))
+            if n_win == 0:
+                continue
+            X_train = X_all[:n_win]
+            y_train = y_phys[:n_win]
 
-            # Need at least 2 classes to train
-            if len(np.unique(y_all)) < 2:
+            if len(np.unique(y_train)) < 2:
                 continue
 
-            # ── Train model ─────────────────────────────────────────────────
-            model = StressModel()
-            model.fit(X_all, y_all)
+            # ── Train RF on physiological labels ───────────────────────────
+            model  = StressModel()
+            model.fit(X_train, y_train)
             preds  = model.predict(X_all)
             scores = model.predict_proba(X_all)
             stress_map[sig_name] = (t_centers, preds)
 
+            # ── Session-interval labels for ROC comparison ──────────────────
+            y_session = build_labels_from_intervals(t_centers, stress_intervals)
+
             # ── Phase features for boxplots ─────────────────────────────────
             phase_feats = _split_by_phase(
-                X_all, t_centers,
-                calming_intervals, stress_intervals
+                X_all, t_centers, calming_intervals, stress_intervals
             )
 
-            # ── Figures ─────────────────────────────────────────────────────
             fig_box = plot_boxplots(phase_feats, sig_name)
-            fig_roc = plot_roc(y_all, scores, sig_name)
+            fig_roc = plot_roc(y_session, scores, sig_name)
             self._figs.extend([fig_box, fig_roc])
 
-            # ── Tab ─────────────────────────────────────────────────────────
             tab = tab_view.add(sig_name)
             self._populate_signal_tab(tab, fig_box, fig_roc,
-                                      model, sig_name, y_all, scores, preds)
+                                      model, sig_name,
+                                      y_session, scores, preds, y_train)
 
         if not stress_map:
-            ctk.CTkLabel(self,
-                         text="Not enough labelled data. "
-                              "Check that stress intervals overlap with signal duration.",
-                         text_color="#cc4400").pack(pady=10)
+            ctk.CTkLabel(
+                self,
+                text="Not enough data to build physiological labels.\n"
+                     "Ensure signals are at least 2× the window size "
+                     f"({RF_WINDOW_SEC} s).",
+                text_color="#cc4400",
+            ).pack(pady=10)
 
         return stress_map
 
@@ -126,9 +141,10 @@ class AnalysisWindow(ctk.CTkFrame):
         fig_roc: plt.Figure,
         model: StressModel,
         sig_name: str,
-        y_true: np.ndarray,
+        y_session: np.ndarray,
         y_scores: np.ndarray,
         preds: np.ndarray,
+        y_phys: np.ndarray,
     ):
         parent.grid_rowconfigure(1, weight=1)
         parent.grid_columnconfigure(0, weight=1)
@@ -138,17 +154,22 @@ class AnalysisWindow(ctk.CTkFrame):
         summary = ctk.CTkFrame(parent, fg_color="transparent")
         summary.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
 
-        n_stressed    = int(preds.sum())
-        n_total       = len(preds)
-        accuracy      = float((preds == y_true).mean())
-        importances   = model.feature_importances()
-        top_idx       = int(np.argmax(importances))
+        n_stressed  = int(preds.sum())
+        n_total     = len(preds)
+        # Agreement between physiological detection and session intervals
+        n_common    = min(len(preds), len(y_session))
+        agreement   = float((preds[:n_common] == y_session[:n_common]).mean()) if n_common else 0.0
+        importances = model.feature_importances()
+        top_idx     = int(np.argmax(importances))
 
-        ctk.CTkLabel(summary,
-                     text=f"  {sig_name}  |  Stressed windows: {n_stressed}/{n_total}"
-                          f"  |  Accuracy: {accuracy:.1%}"
-                          f"  |  Top feature: {FEATURE_NAMES[top_idx]}",
-                     font=("Arial", 11)).pack(side="left")
+        ctk.CTkLabel(
+            summary,
+            text=(f"  {sig_name}  |  "
+                  f"Physio-stressed windows: {n_stressed}/{n_total}  |  "
+                  f"Agreement with session: {agreement:.1%}  |  "
+                  f"Top feature: {FEATURE_NAMES[top_idx]}"),
+            font=("Arial", 11),
+        ).pack(side="left")
 
         # ── Boxplots (left) ────────────────────────────────────────────────
         frame_box = ctk.CTkFrame(parent)

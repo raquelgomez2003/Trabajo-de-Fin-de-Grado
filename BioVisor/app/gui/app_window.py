@@ -9,6 +9,7 @@ Layout
 """
 
 from __future__ import annotations
+import os
 import customtkinter as ctk
 from tkinter import messagebox
 import matplotlib.pyplot as plt
@@ -84,9 +85,11 @@ class AppWindow(ctk.CTk):
             e2.pack(side="left", padx=2)
             return e1, e2
 
-        self._e_calm_s, self._e_calm_e   = _phase_row("Calming", "#2a8a4a")
+        self._e_calm_s, self._e_calm_e     = _phase_row("Calming", "#2a8a4a")
         self._e_stress_s, self._e_stress_e = _phase_row("Stress",  "#aa2222")
-        self._e_relax_s, self._e_relax_e = _phase_row("Relax",   "#2244aa")
+
+        ctk.CTkLabel(self._left, text="Relax = everything outside\nCalming & Stress",
+                     font=("Arial", 9), text_color="gray").pack(pady=(0, 4))
 
         ctk.CTkButton(self._left, text="Update Viewer",
                       command=self._update_viewer).pack(fill="x", padx=14, pady=(10, 4))
@@ -252,23 +255,43 @@ class AppWindow(ctk.CTk):
     # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _read_phase_intervals(self) -> dict[str, list[tuple[float, float]]]:
-        """Parse the phase entry fields; silently skip invalid/empty pairs."""
-        result: dict[str, list[tuple[float, float]]] = {
-            "calming": [], "vexing": [], "relax": []
-        }
+        """
+        Parse calming and stress fields.
+        Relax = every second of the recording NOT covered by calming or stress.
+        Signal duration is estimated from the longest loaded signal.
+        """
+        calming, vexing = [], []
 
-        def _parse(es, ee, key):
+        def _parse(es, ee, target):
             try:
                 s = float(es.get())
                 e = float(ee.get())
-                result[key].append((s, e))
+                if e > s:
+                    target.append((s, e))
             except ValueError:
                 pass
 
-        _parse(self._e_calm_s,   self._e_calm_e,   "calming")
-        _parse(self._e_stress_s, self._e_stress_e, "vexing")
-        _parse(self._e_relax_s,  self._e_relax_e,  "relax")
-        return result
+        _parse(self._e_calm_s,   self._e_calm_e,   calming)
+        _parse(self._e_stress_s, self._e_stress_e, vexing)
+
+        # Compute relax as everything else, up to the signal duration
+        relax = []
+        if self._signals:
+            fs_map  = self._cfg.get("fs", {})
+            sig_dur = max(
+                len(sig) / fs_map.get(name, 2000)
+                for name, sig in self._signals.items()
+            )
+            occupied = sorted(calming + vexing, key=lambda x: x[0])
+            cursor = 0.0
+            for start, end in occupied:
+                if start > cursor:
+                    relax.append((cursor, start))
+                cursor = max(cursor, end)
+            if cursor < sig_dur:
+                relax.append((cursor, sig_dur))
+
+        return {"calming": calming, "vexing": vexing, "relax": relax}
 
     def _set_status(self, msg: str):
         self._lbl_status.configure(text=msg)
@@ -276,3 +299,4 @@ class AppWindow(ctk.CTk):
     def _on_close(self):
         plt.close("all")
         self.destroy()
+        os._exit(0)   # force-kill the process so VSCode terminal doesn't hang
