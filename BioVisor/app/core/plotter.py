@@ -51,71 +51,133 @@ def plot_signals_with_stress(
     signals: dict[str, np.ndarray],
     fs_map: dict[str, float],
     phase_intervals: dict[str, list[tuple[float, float]]],
-    stress_map: dict[str, tuple[np.ndarray, np.ndarray]],  # {sig: (t_centers, preds)}
+    stress_map: dict[str, tuple[np.ndarray, np.ndarray]],
     bpm_data: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> Figure:
     """
     One subplot per signal.
-    Shades phase regions, marks predicted-stress windows with red triangles.
-    If bpm_data is provided and ECG is present, overlays BPM on ECG panel.
+    ECG gets an extra BPM sub-panel directly below it showing:
+      - BPM as a step line
+      - Vertical markers at every BPM change point
+      - Red zones where BPM is above the subject's own mean+std (stress alert)
     """
     sig_names = list(signals.keys())
-    n = len(sig_names)
-    if n == 0:
+    n_sigs = len(sig_names)
+    if n_sigs == 0:
         fig, ax = plt.subplots()
         ax.text(0.5, 0.5, "No signals loaded", ha="center", va="center")
         return fig
 
-    fig, axs = plt.subplots(n, 1, figsize=(12, 2.6 * n), sharex=True)
-    if n == 1:
+    has_ecg  = "ECG" in sig_names
+    has_bpm  = has_ecg and bpm_data is not None and len(bpm_data[0]) > 0
+    n_panels = n_sigs + (1 if has_bpm else 0)   # extra BPM panel
+
+    # ECG gets 2× height; BPM panel gets 1.2×; others 1×
+    height_ratios = []
+    for name in sig_names:
+        height_ratios.append(2.0 if name == "ECG" else 1.0)
+    if has_bpm:
+        height_ratios.append(1.2)
+
+    fig, axs = plt.subplots(
+        n_panels, 1,
+        figsize=(13, sum(height_ratios) * 1.8),
+        gridspec_kw={"height_ratios": height_ratios},
+        sharex=True,
+    )
+    if n_panels == 1:
         axs = [axs]
 
-    fig.suptitle("Signal Viewer", fontsize=13, fontweight="bold", y=0.995)
+    fig.suptitle("Signal Viewer", fontsize=13, fontweight="bold", y=0.998)
 
-    for ax, name in zip(axs, sig_names):
+    # ── Draw each signal ────────────────────────────────────────────────────
+    for ax_idx, name in enumerate(sig_names):
+        ax   = axs[ax_idx]
         sig  = signals[name]
         fs   = fs_map.get(name, 2000)
-        data = sig[:, 0] if sig.ndim == 2 else sig
+        data = sig.ravel()                          # always flatten to 1D
         t    = np.arange(len(data)) / fs
 
-        ax.plot(t, data, lw=0.7, color="#2255aa", label=name)
+        ax.plot(t, data, lw=0.6, color="#2255aa", label=name, rasterized=True)
         _shade_phases(ax, phase_intervals)
 
-        # Stress overlay
         if name in stress_map:
             t_c, preds = stress_map[name]
-            _stress_overlay(ax, t_c, preds, float(np.nanmax(data)))
-
-        # BPM twin axis on ECG
-        if name == "ECG" and bpm_data is not None:
-            t_bpm, bpm = bpm_data
-            if len(t_bpm):
-                ax2 = ax.twinx()
-                ax2.plot(t_bpm, bpm, color="#e06000", lw=1.2,
-                         linestyle="--", label="BPM")
-                ax2.set_ylabel("BPM", color="#e06000", fontsize=8)
-                ax2.tick_params(axis="y", labelcolor="#e06000")
+            y_top = float(np.nanpercentile(data, 99))
+            _stress_overlay(ax, t_c, preds, y_top)
 
         ax.set_ylabel(name, fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.set_title(name, fontsize=9, loc="left")
+        ax.set_title(name, fontsize=9, loc="left", pad=2)
+        ax.grid(True, alpha=0.25)
+        ax.yaxis.set_label_position("left")
+
+    # ── BPM panel ───────────────────────────────────────────────────────────
+    if has_bpm:
+        t_bpm, bpm = bpm_data
+        ax_bpm = axs[n_sigs]
+
+        # Step line
+        ax_bpm.step(t_bpm, bpm, where="post", color="#e06000",
+                    lw=1.4, label="BPM", zorder=3)
+        ax_bpm.fill_between(t_bpm, bpm, alpha=0.12, color="#e06000",
+                             step="post")
+
+        # Personalised stress threshold: mean + 1 std of this subject's BPM
+        bpm_mean = np.mean(bpm)
+        bpm_std  = np.std(bpm)
+        thresh   = bpm_mean + bpm_std
+
+        ax_bpm.axhline(bpm_mean, color="#888888", lw=0.8,
+                       linestyle="--", label=f"Mean {bpm_mean:.0f} bpm")
+        ax_bpm.axhline(thresh, color="#cc0000", lw=0.8,
+                       linestyle=":", label=f"Stress threshold {thresh:.0f} bpm")
+
+        # Shade windows where BPM > threshold (high-BPM stress zones)
+        for i in range(len(t_bpm) - 1):
+            if bpm[i] > thresh:
+                ax_bpm.axvspan(t_bpm[i], t_bpm[i + 1],
+                               color="#ffaaaa", alpha=0.35, zorder=0)
+        # Last point
+        if bpm[-1] > thresh:
+            ax_bpm.axvspan(t_bpm[-1], t_bpm[-1] + (t_bpm[-1] - t_bpm[-2]),
+                           color="#ffaaaa", alpha=0.35, zorder=0)
+
+        # Vertical markers at BPM change points (> 3 bpm jump)
+        diffs      = np.abs(np.diff(bpm))
+        jump_idx   = np.where(diffs > 3)[0]
+        for ji in jump_idx:
+            direction = "▲" if bpm[ji + 1] > bpm[ji] else "▼"
+            color     = "#cc0000" if bpm[ji + 1] > bpm[ji] else "#2255aa"
+            ax_bpm.axvline(t_bpm[ji], color=color, lw=0.8, alpha=0.6, zorder=2)
+            ax_bpm.text(t_bpm[ji], thresh + 1, direction,
+                        color=color, fontsize=6, ha="center", va="bottom",
+                        clip_on=True)
+
+        _shade_phases(ax_bpm, phase_intervals)
+        ax_bpm.set_ylabel("BPM", fontsize=8)
+        ax_bpm.set_title("Heart Rate (BPM) — red zone = above personal stress threshold",
+                         fontsize=8, loc="left", pad=2)
+        ax_bpm.legend(fontsize=7, loc="upper right")
+        ax_bpm.grid(True, alpha=0.25)
 
     axs[-1].set_xlabel("Time (s)", fontsize=9)
 
-    # Legend for phases
+    # ── Legend ──────────────────────────────────────────────────────────────
     legend_patches = [
         mpatches.Patch(color=col, alpha=0.5, label=lbl)
         for col, lbl in PHASE_COLORS.values()
     ]
     legend_patches.append(
         plt.Line2D([0], [0], marker="v", color="w",
-                   markerfacecolor="#cc0000", markersize=7, label="Predicted stress")
+                   markerfacecolor="#cc0000", markersize=7,
+                   label="Predicted stress")
     )
     fig.legend(handles=legend_patches, loc="lower center",
                ncol=len(legend_patches), fontsize=8,
-               bbox_to_anchor=(0.5, -0.01))
+               bbox_to_anchor=(0.5, -0.005))
 
-    fig.tight_layout(rect=[0, 0.04, 1, 0.99])
+    fig.tight_layout(rect=[0, 0.03, 1, 0.998])
+    plt.subplots_adjust(hspace=0.45)
     return fig
 
 

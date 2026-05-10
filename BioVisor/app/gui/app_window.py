@@ -66,6 +66,15 @@ class AppWindow(ctk.CTk):
         ctk.CTkButton(self._left, text="⚙  New Session",
                       command=self._open_setup).pack(fill="x", padx=14, pady=4)
 
+        # Filter toggle
+        self._filter_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            self._left,
+            text="Apply artifact filter",
+            variable=self._filter_var,
+            font=("Arial", 11),
+        ).pack(padx=14, pady=(4, 0), anchor="w")
+
         # Subject buttons (built dynamically after setup)
         self._frame_subjects = ctk.CTkScrollableFrame(self._left, label_text="Subjects", height=180)
         self._frame_subjects.pack(fill="x", padx=10, pady=(10, 6))
@@ -156,17 +165,24 @@ class AppWindow(ctk.CTk):
         device     = cfg["device"]
         signals_to_load = cfg["signals"]
 
-        # Try Base1_SujetoN / SubjectN subfolder patterns
+        # Folder candidates — tried in order, first non-empty result wins
         candidates = [
-            folder,                                              # flat: all in root
-            f"{folder}/Base1_Sujeto{num}/Biopac data",          # original structure
-            f"{folder}/Subject{num}",
-            f"{folder}/S{num:02d}",
+            os.path.join(folder, f"Base1_Sujeto{num}", "Biopac data"),
+            os.path.join(folder, f"Base1_Sujeto{num}"),
+            os.path.join(folder, f"Subject{num}"),
+            os.path.join(folder, f"S{num:02d}"),
+            folder,   # flat: everything in root
         ]
         loaded = {}
         for candidate in candidates:
             try:
-                loaded = load_subject_folder(candidate, device, signals_to_load)
+                loaded = load_subject_folder(
+                    candidate,
+                    device,
+                    signals_to_load,
+                    fs_map=self._cfg.get("fs", {}),
+                    apply_filters=self._filter_var.get(),
+                )
                 if loaded:
                     break
             except FileNotFoundError:

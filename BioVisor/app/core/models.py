@@ -172,7 +172,7 @@ def extract_features_windowed(
     Returns (X [n_windows, FEATURE_DIM], t_centers [n_windows]) in seconds.
     """
     if signal.ndim == 2:
-        signal = signal[:, 1] if signal.shape[1] > 1 else signal[:, 0]
+        signal = signal.ravel() if signal.shape[1] == 1 else signal[:, 0]
 
     win_samples  = int(window_sec * fs)
     step_samples = max(1, int(step_sec * fs))
@@ -345,25 +345,29 @@ def compute_bpm(
     """
     Detect R-peaks and compute sliding-window BPM.
     Returns (t_bpm [seconds], bpm_values).
+    Signal is always flattened to 1D regardless of input shape.
     """
-    if ecg_signal.ndim == 2:
-        ecg_signal = ecg_signal[:, 1] if ecg_signal.shape[1] > 1 else ecg_signal[:, 0]
+    ecg_1d = ecg_signal.ravel()   # works for both 1D and any 2D shape
 
-    filtered = _bandpass(ecg_signal, fs, 0.5, 40.0)
+    try:
+        filtered = _bandpass(ecg_1d, fs, 0.5, 40.0)
+    except Exception:
+        return np.array([]), np.array([])
+
     min_dist = int(min_rr_sec * fs)
-    peaks, _ = find_peaks(filtered, distance=min_dist,
-                          height=0.3 * np.std(filtered))
+    height   = 0.3 * np.std(filtered)
+    peaks, _ = find_peaks(filtered, distance=min_dist, height=height)
 
     if len(peaks) < 2:
         return np.array([]), np.array([])
 
     peak_times   = peaks / fs
     win_samples  = int(window_sec * fs)
-    step_samples = int(step_sec   * fs)
+    step_samples = max(1, int(step_sec * fs))
 
     bpm_times, bpm_values = [], []
     start = 0
-    while start + win_samples <= len(ecg_signal):
+    while start + win_samples <= len(ecg_1d):
         t_start  = start / fs
         t_end    = (start + win_samples) / fs
         rr_peaks = peak_times[(peak_times >= t_start) & (peak_times < t_end)]

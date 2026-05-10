@@ -48,3 +48,41 @@ RF_STEP_SEC   = 30      # 50 % overlap
 
 # BPM detection: minimum peak distance (seconds)
 ECG_MIN_RR_SEC = 0.3    # ~200 BPM upper bound
+
+# ── Artifact / outlier filter parameters per signal type ──────────────────────
+#
+# Each entry defines how clean_signal() in filters.py treats that signal.
+#
+#   iqr_factor   : values outside median ± iqr_factor·IQR are clipped → interpolated.
+#                  Lower = more aggressive. Typical range 2–6.
+#                  Use None to disable outlier removal for that signal.
+#
+#   bandpass     : (low_hz, high_hz) physiological band to keep, or None to skip.
+#                  Applied after outlier removal using a zero-phase Butterworth filter.
+#
+#   savgol       : (window_samples, poly_order) Savitzky-Golay smooth, or None to skip.
+#                  Good for slow signals (EDA, SKT, TEMP) that should stay smooth.
+#
+# Philosophy:
+#   ECG  → tight outlier clip + bandpass only (preserve R-peak sharpness, no smoothing)
+#   EMG  → moderate clip + wide bandpass (high-freq muscle content must be kept)
+#   EDA  → gentle clip + heavy smooth (slow signal, noise looks like spikes)
+#   RESP → moderate clip + narrow bandpass around breathing frequency
+#   PPG  → moderate clip + bandpass (pulsatile, similar to ECG but slower)
+#   SKT/TEMP → gentle clip + Savitzky-Golay (very slow drift, smooth is correct)
+#
+SIGNAL_FILTER_PARAMS: dict[str, dict] = {
+    "ECG":  {"iqr_factor": 3.0,  "bandpass": (0.5,  40.0), "savgol": None},
+    "BVP":  {"iqr_factor": 3.0,  "bandpass": (0.5,  40.0), "savgol": None},
+    "EMG":  {"iqr_factor": 4.0,  "bandpass": (20.0, 450.0),"savgol": None},
+    "PPG":  {"iqr_factor": 3.5,  "bandpass": (0.5,  10.0), "savgol": None},
+    "EDA":  {"iqr_factor": 4.0,  "bandpass": None,          "savgol": (51, 3)},
+    "GSR":  {"iqr_factor": 4.0,  "bandpass": None,          "savgol": (51, 3)},
+    "RESP": {"iqr_factor": 3.5,  "bandpass": (0.05,  2.0),  "savgol": None},
+    "SKT":  {"iqr_factor": 5.0,  "bandpass": None,          "savgol": (101, 2)},
+    "TEMP": {"iqr_factor": 5.0,  "bandpass": None,          "savgol": (101, 2)},
+    "ACC":  {"iqr_factor": 5.0,  "bandpass": None,          "savgol": None},
+    "HR":   {"iqr_factor": 4.0,  "bandpass": None,          "savgol": (11, 2)},
+    # Default fallback for any unlisted signal
+    "_default": {"iqr_factor": 4.0, "bandpass": None, "savgol": None},
+}
