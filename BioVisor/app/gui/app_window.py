@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 from app.core.config import RF_WINDOW_SEC, RF_STEP_SEC
 from app.core.data_loader import load_subject_folder, time_axis
-from app.core.models import compute_bpm
+from app.core.models import compute_bpm, compute_rr
 
 from app.gui.setup_window import SetupWindow
 from app.gui.viewer_window import ViewerWindow
@@ -212,11 +212,11 @@ class AppWindow(ctk.CTk):
 
         phase_intervals = self._read_phase_intervals()
         bpm_data = None
+        rr_data  = None
         if "ECG" in self._signals:
-            bpm_data = compute_bpm(
-                self._signals["ECG"],
-                self._cfg.get("fs", {}).get("ECG", 2000),
-            )
+            ecg_fs   = self._cfg.get("fs", {}).get("ECG", 2000)
+            bpm_data = compute_bpm(self._signals["ECG"], ecg_fs)
+            rr_data  = compute_rr(self._signals["ECG"],  ecg_fs)
 
         self._viewer.render(
             self._signals,
@@ -224,6 +224,7 @@ class AppWindow(ctk.CTk):
             phase_intervals,
             self._stress_map,
             bpm_data,
+            rr_data,
         )
         self._tabs.set("Signal Viewer")
 

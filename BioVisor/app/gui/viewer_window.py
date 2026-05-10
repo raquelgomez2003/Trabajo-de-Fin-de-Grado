@@ -57,12 +57,13 @@ class ViewerWindow(ctk.CTkFrame):
         phase_intervals: dict,
         stress_map: dict,
         bpm_data=None,
+        rr_data=None,
     ):
         """Draw (or redraw) the viewer figure."""
         self._clear()
 
         self._fig = plot_signals_with_stress(
-            signals, fs_map, phase_intervals, stress_map, bpm_data
+            signals, fs_map, phase_intervals, stress_map, bpm_data, rr_data
         )
         self._canvas = FigureCanvasTkAgg(self._fig, master=self._frame_plot)
         self._canvas.draw()
