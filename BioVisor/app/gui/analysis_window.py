@@ -1,45 +1,248 @@
 """
 analysis_window.py
-Analysis tab — stress prediction summary, boxplots per phase, ROC curves.
-One tab per signal inside a CTkTabview.
+Analysis tab — stress prediction with configurable plot selection.
+
+Layout
+------
+  Left panel (fixed 240 px):
+    · Signal checkboxes      — which signals to analyse
+    · Plot type checkboxes   — Boxplots / ROC / Feature importance / Stress timeline
+    · Feature selector       — which of the 12 features to include in boxplots
+    · Window / step entries  — override default RF window size
+    · [Run] button
+
+  Right area (scrollable):
+    · One collapsible section per selected signal × selected plot type
 """
 
 from __future__ import annotations
 import numpy as np
 import customtkinter as ctk
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from sklearn.model_selection import cross_val_predict
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
 
 from app.core.models import (
-    StressModel, extract_features_windowed,
-    build_labels_from_intervals, build_physiological_labels,
-    FEATURE_NAMES, FEATURE_DIM,
+    StressModel,
+    extract_features_windowed,
+    build_labels_from_intervals,
+    build_physiological_labels,
+    FEATURE_NAMES,
+    FEATURE_DIM,
+    HRV_FEATURE_NAMES,
 )
 from app.core.config import RF_WINDOW_SEC, RF_STEP_SEC
 from app.core.plotter import plot_boxplots, plot_roc
 
 
+# ── Extra plot functions (defined here to keep plotter.py clean) ──────────────
+
+def _plot_feature_importance(model: StressModel, sig_name: str,
+                              feature_names: list[str]) -> plt.Figure:
+    """Horizontal bar chart of feature importances."""
+    imp  = model.feature_importances()
+    idx  = np.argsort(imp)
+    names = [feature_names[i] for i in idx]
+    vals  = imp[idx]
+
+    fig, ax = plt.subplots(figsize=(5, max(3, len(names) * 0.4)))
+    bars = ax.barh(names, vals, color="#2255aa", alpha=0.75)
+    ax.set_xlabel("Importance", fontsize=9)
+    ax.set_title(f"Feature importance — {sig_name}", fontsize=10, fontweight="bold")
+    ax.grid(True, axis="x", alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_stress_timeline(
+    t_centers: np.ndarray,
+    preds: np.ndarray,
+    scores: np.ndarray,
+    sig_name: str,
+    stress_intervals: list[tuple[float, float]],
+) -> plt.Figure:
+    """Stress probability over time with session-interval shading."""
+    fig, ax = plt.subplots(figsize=(10, 2.8))
+
+    ax.fill_between(t_centers, scores, alpha=0.35, color="#2255aa", label="Stress probability")
+    ax.plot(t_centers, scores, lw=0.8, color="#2255aa")
+    ax.axhline(0.5, color="#cc0000", lw=0.8, ls="--", label="Decision threshold 0.5")
+
+    for s, e in stress_intervals:
+        ax.axvspan(s, e, color="#ffb3b3", alpha=0.4, label="Session stress interval")
+
+    # Mark predicted-stress windows
+    stressed_t = t_centers[preds == 1]
+    if len(stressed_t):
+        ax.scatter(stressed_t, np.full(len(stressed_t), 0.02),
+                   color="#cc0000", marker="|", s=40, zorder=5,
+                   label="Predicted stress")
+
+    ax.set_ylim(0, 1.05)
+    ax.set_xlabel("Time (s)", fontsize=9)
+    ax.set_ylabel("P(stress)", fontsize=9)
+    ax.set_title(f"Stress probability over time — {sig_name}",
+                 fontsize=10, fontweight="bold")
+
+    # Deduplicate legend
+    handles, labels = ax.get_legend_handles_labels()
+    seen = {}
+    for h, l in zip(handles, labels):
+        seen.setdefault(l, h)
+    ax.legend(seen.values(), seen.keys(), fontsize=8, loc="upper right")
+    ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+    return fig
+
+
+# ── Main analysis window ──────────────────────────────────────────────────────
+
 class AnalysisWindow(ctk.CTkFrame):
     """
     Embedded frame used as a tab inside AppWindow.
-    Call run_analysis(signals, fs_map, stress_intervals) to populate.
+    Exposes a left control panel; results appear on the right after [Run].
+    Call load_data(signals, fs_map, stress_intervals, calming_intervals)
+    to populate the signal checkboxes before the user presses Run.
     """
+
+    # Available plot types
+    PLOT_TYPES = [
+        ("Boxplots",           "boxplots"),
+        ("ROC curve",          "roc"),
+        ("Feature importance", "importance"),
+        ("Stress timeline",    "timeline"),
+    ]
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         self._figs: list[plt.Figure] = []
-        self._build_placeholder()
 
-    def _build_placeholder(self):
-        ctk.CTkLabel(
-            self, text="Run analysis after loading a subject.",
-            text_color="gray", font=("Arial", 13),
-        ).pack(expand=True)
+        # Data cache (set by load_data)
+        self._signals:           dict[str, np.ndarray]        = {}
+        self._fs_map:            dict[str, float]             = {}
+        self._stress_intervals:  list[tuple[float, float]]    = []
+        self._calming_intervals: list[tuple[float, float]]    = []
 
-    # ── Public entry point ────────────────────────────────────────────────────
+        # Control vars (built in _build_controls)
+        self._sig_vars:      dict[str, ctk.BooleanVar] = {}
+        self._plot_vars:     dict[str, ctk.BooleanVar] = {}
+        self._feat_vars:     dict[str, ctk.BooleanVar] = {}
+        self._window_var:    ctk.StringVar | None = None
+        self._step_var:      ctk.StringVar | None = None
+        self._status_var:    ctk.StringVar | None = None
+
+        # Results area
+        self._results_frame: ctk.CTkScrollableFrame | None = None
+
+        self._build_layout()
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+
+    def _build_layout(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # Left control panel
+        self._ctrl = ctk.CTkScrollableFrame(self, width=230)
+        self._ctrl.grid(row=0, column=0, sticky="ns", padx=(6, 2), pady=6)
+
+        ctk.CTkLabel(self._ctrl, text="Analysis controls",
+                     font=("Arial", 13, "bold")).pack(anchor="w", pady=(8, 4))
+
+        self._build_controls()
+
+        # Right results area (scrollable)
+        self._results_frame = ctk.CTkScrollableFrame(self)
+        self._results_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 6), pady=6)
+        self._results_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(self._results_frame,
+                     text="Configure the controls on the left and press Run.",
+                     text_color="gray", font=("Arial", 13)).pack(pady=40)
+
+    def _build_controls(self):
+        """Build all widgets in the left panel."""
+        ctrl = self._ctrl
+
+        # ── Signals ───────────────────────────────────────────────────────
+        self._sig_section = ctk.CTkFrame(ctrl, fg_color="transparent")
+        self._sig_section.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(self._sig_section, text="Signals to analyse",
+                     font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(self._sig_section, text="(load a subject first)",
+                     text_color="gray", font=("Arial", 10)).pack(anchor="w")
+
+        # ── Plot types ────────────────────────────────────────────────────
+        ctk.CTkLabel(ctrl, text="Plot types",
+                     font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 2))
+        self._plot_vars = {}
+        for label, key in self.PLOT_TYPES:
+            var = ctk.BooleanVar(value=True)
+            self._plot_vars[key] = var
+            ctk.CTkCheckBox(ctrl, text=label, variable=var,
+                            font=("Arial", 11)).pack(anchor="w", padx=4, pady=1)
+
+        # ── Features for boxplots ─────────────────────────────────────────
+        ctk.CTkLabel(ctrl, text="Features (boxplots)",
+                     font=("Arial", 11, "bold")).pack(anchor="w", pady=(10, 2))
+
+        feat_scroll = ctk.CTkScrollableFrame(ctrl, height=160)
+        feat_scroll.pack(fill="x", padx=2)
+        self._feat_vars = {}
+        for name in FEATURE_NAMES:
+            var = ctk.BooleanVar(value=True)
+            self._feat_vars[name] = var
+            ctk.CTkCheckBox(feat_scroll, text=name, variable=var,
+                            font=("Arial", 10)).pack(anchor="w", pady=1)
+
+        # Select / deselect all features
+        btn_row = ctk.CTkFrame(ctrl, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(2, 0))
+        ctk.CTkButton(btn_row, text="All", width=60, height=24,
+                      command=lambda: self._set_all_feats(True)).pack(side="left", padx=2)
+        ctk.CTkButton(btn_row, text="None", width=60, height=24,
+                      fg_color="transparent", border_width=1,
+                      command=lambda: self._set_all_feats(False)).pack(side="left", padx=2)
+
+        # ── Window / step ─────────────────────────────────────────────────
+        ctk.CTkLabel(ctrl, text="Window size (s)",
+                     font=("Arial", 11, "bold")).pack(anchor="w", pady=(10, 2))
+        self._window_var = ctk.StringVar(value=str(RF_WINDOW_SEC))
+        ctk.CTkEntry(ctrl, textvariable=self._window_var,
+                     height=28).pack(fill="x", padx=4)
+
+        ctk.CTkLabel(ctrl, text="Step size (s)",
+                     font=("Arial", 11, "bold")).pack(anchor="w", pady=(6, 2))
+        self._step_var = ctk.StringVar(value=str(RF_STEP_SEC))
+        ctk.CTkEntry(ctrl, textvariable=self._step_var,
+                     height=28).pack(fill="x", padx=4)
+
+        # ── Run ───────────────────────────────────────────────────────────
+        ctk.CTkButton(ctrl, text="▶  Run analysis",
+                      height=38, fg_color="#336699", hover_color="#224477",
+                      command=self._run).pack(fill="x", padx=4, pady=(14, 4))
+
+        self._status_var = ctk.StringVar(value="")
+        ctk.CTkLabel(ctrl, textvariable=self._status_var,
+                     text_color="gray", font=("Arial", 10),
+                     wraplength=210).pack(padx=4, pady=2)
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def load_data(
+        self,
+        signals: dict[str, np.ndarray],
+        fs_map: dict[str, float],
+        stress_intervals: list[tuple[float, float]],
+        calming_intervals: list[tuple[float, float]],
+    ) -> None:
+        """Called by AppWindow after loading a subject. Refreshes signal checkboxes."""
+        self._signals           = signals
+        self._fs_map            = fs_map
+        self._stress_intervals  = stress_intervals
+        self._calming_intervals = calming_intervals
+        self._refresh_signal_checkboxes()
 
     def run_analysis(
         self,
@@ -48,48 +251,100 @@ class AnalysisWindow(ctk.CTkFrame):
         stress_intervals: list[tuple[float, float]],
         calming_intervals: list[tuple[float, float]],
     ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        """
-        1. Derive stress labels from physiology (BPM, EDA, RESP, etc.) via majority vote.
-        2. Train one RandomForest per signal using those physiological labels.
-        3. Generate boxplots (features split by session phase) and ROC curves
-           (physiological predictions vs session-interval ground truth).
-        Returns stress_map: {signal_name: (t_centers, predictions)} for the viewer.
-        """
-        for w in self.winfo_children():
-            w.destroy()
-        for fig in self._figs:
-            plt.close(fig)
-        self._figs.clear()
+        """Compatibility shim: load data then run immediately."""
+        self.load_data(signals, fs_map, stress_intervals, calming_intervals)
+        return self._run()
 
-        if not signals:
-            self._build_placeholder()
+    # ── Control helpers ───────────────────────────────────────────────────────
+
+    def _refresh_signal_checkboxes(self):
+        """Rebuild signal checkboxes whenever a new subject is loaded."""
+        for w in self._sig_section.winfo_children():
+            w.destroy()
+        ctk.CTkLabel(self._sig_section, text="Signals to analyse",
+                     font=("Arial", 11, "bold")).pack(anchor="w")
+        self._sig_vars = {}
+        for sig in self._signals:
+            var = ctk.BooleanVar(value=True)
+            self._sig_vars[sig] = var
+            ctk.CTkCheckBox(self._sig_section, text=sig, variable=var,
+                            font=("Arial", 11)).pack(anchor="w", padx=4, pady=1)
+        if self._status_var:
+            self._status_var.set(f"{len(self._signals)} signal(s) ready.")
+
+    def _set_all_feats(self, value: bool):
+        for var in self._feat_vars.values():
+            var.set(value)
+
+    def _selected_signals(self) -> list[str]:
+        return [s for s, v in self._sig_vars.items() if v.get()]
+
+    def _selected_plots(self) -> set[str]:
+        return {k for k, v in self._plot_vars.items() if v.get()}
+
+    def _selected_features(self) -> list[int]:
+        """Return indices of selected features."""
+        return [i for i, name in enumerate(FEATURE_NAMES)
+                if self._feat_vars.get(name, ctk.BooleanVar(value=True)).get()]
+
+    def _get_window_step(self) -> tuple[float, float]:
+        try:
+            win  = float(self._window_var.get())
+            step = float(self._step_var.get())
+            assert win > 0 and step > 0 and step <= win
+            return win, step
+        except Exception:
+            return RF_WINDOW_SEC, RF_STEP_SEC
+
+    # ── Run ───────────────────────────────────────────────────────────────────
+
+    def _run(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """Execute analysis with current control settings."""
+        self._clear_results()
+
+        selected_sigs  = self._selected_signals()
+        selected_plots = self._selected_plots()
+        feat_indices   = self._selected_features()
+        window_sec, step_sec = self._get_window_step()
+
+        if not selected_sigs:
+            self._set_status("Select at least one signal.")
+            return {}
+        if not selected_plots:
+            self._set_status("Select at least one plot type.")
+            return {}
+        if not self._signals:
+            self._set_status("Load a subject first.")
             return {}
 
-        ctk.CTkLabel(self, text="Analysis Results",
-                     font=("Arial", 14, "bold")).pack(pady=(10, 4))
+        self._set_status("Running…")
+        self.update_idletasks()
 
-        # ── Step 1: physiological labels (cross-signal majority vote) ──────
+        signals = {s: self._signals[s] for s in selected_sigs if s in self._signals}
+
+        # Physiological labels (multi-signal majority vote)
         t_phys, y_phys = build_physiological_labels(
-            signals, fs_map, RF_WINDOW_SEC, RF_STEP_SEC
+            signals, self._fs_map, window_sec, step_sec
         )
 
-        tab_view = ctk.CTkTabview(self)
-        tab_view.pack(fill="both", expand=True, padx=8, pady=8)
+        # Feature names for selected subset
+        sel_feat_names = [FEATURE_NAMES[i] for i in feat_indices] if feat_indices else FEATURE_NAMES
 
-        stress_map = {}
+        stress_map: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        row_idx = 0
 
-        for sig_name, signal in signals.items():
-            fs = fs_map.get(sig_name, 2000)
+        for sig_name in selected_sigs:
+            if sig_name not in signals:
+                continue
 
-            # ── Per-signal feature matrix ───────────────────────────────────
+            fs = self._fs_map.get(sig_name, 2000)
             X_all, t_centers = extract_features_windowed(
-                signal, fs, sig_name, RF_WINDOW_SEC, RF_STEP_SEC
+                signals[sig_name], fs, sig_name, window_sec, step_sec
             )
             if len(X_all) == 0:
                 continue
 
-            # ── Align physiological labels to this signal's windows ─────────
-            n_win = min(len(X_all), len(t_phys))
+            n_win   = min(len(X_all), len(t_phys))
             if n_win == 0:
                 continue
             X_train = X_all[:n_win]
@@ -98,114 +353,135 @@ class AnalysisWindow(ctk.CTkFrame):
             if len(np.unique(y_train)) < 2:
                 continue
 
-            # ── Train RF on physiological labels ───────────────────────────
             model  = StressModel()
             model.fit(X_train, y_train)
             preds  = model.predict(X_all)
             scores = model.predict_proba(X_all)
             stress_map[sig_name] = (t_centers, preds)
 
-            # ── Session-interval labels for ROC comparison ──────────────────
-            y_session = build_labels_from_intervals(t_centers, stress_intervals)
-
-            # ── Phase features for boxplots ─────────────────────────────────
+            y_session = build_labels_from_intervals(t_centers, self._stress_intervals)
             phase_feats = _split_by_phase(
-                X_all, t_centers, calming_intervals, stress_intervals
+                X_all, t_centers,
+                self._calming_intervals, self._stress_intervals
             )
 
-            fig_box = plot_boxplots(phase_feats, sig_name)
-            fig_roc = plot_roc(y_session, scores, sig_name)
-            self._figs.extend([fig_box, fig_roc])
+            # ── Section header ────────────────────────────────────────────
+            self._add_section_header(sig_name, preds, scores, model, row_idx)
+            row_idx += 1
 
-            tab = tab_view.add(sig_name)
-            self._populate_signal_tab(tab, fig_box, fig_roc,
-                                      model, sig_name,
-                                      y_session, scores, preds, y_train)
+            # ── Selected plots ────────────────────────────────────────────
+            if "boxplots" in selected_plots:
+                # Filter to selected features
+                if feat_indices and len(feat_indices) < FEATURE_DIM:
+                    phase_feats_sel = {
+                        ph: X[:, feat_indices] if X.ndim == 2 and X.shape[1] >= FEATURE_DIM
+                            else X
+                        for ph, X in phase_feats.items()
+                    }
+                else:
+                    phase_feats_sel = phase_feats
+
+                fig = plot_boxplots(phase_feats_sel, sig_name, sel_feat_names)
+                self._add_plot(f"Feature distributions — {sig_name}", fig, row_idx)
+                row_idx += 1
+
+            if "roc" in selected_plots:
+                fig = plot_roc(y_session, scores, sig_name)
+                self._add_plot(f"ROC curve — {sig_name}", fig, row_idx)
+                row_idx += 1
+
+            if "importance" in selected_plots:
+                fig = _plot_feature_importance(model, sig_name, FEATURE_NAMES)
+                self._add_plot(f"Feature importance — {sig_name}", fig, row_idx)
+                row_idx += 1
+
+            if "timeline" in selected_plots:
+                fig = _plot_stress_timeline(
+                    t_centers, preds, scores, sig_name, self._stress_intervals
+                )
+                self._add_plot(f"Stress timeline — {sig_name}", fig, row_idx)
+                row_idx += 1
 
         if not stress_map:
             ctk.CTkLabel(
-                self,
-                text="Not enough data to build physiological labels.\n"
-                     "Ensure signals are at least 2× the window size "
-                     f"({RF_WINDOW_SEC} s).",
-                text_color="#cc4400",
-            ).pack(pady=10)
+                self._results_frame,
+                text="Not enough data for analysis.\n"
+                     f"Signals need ≥ 2× the window size ({window_sec:.0f} s).",
+                text_color="#cc4400", font=("Arial", 12),
+            ).grid(row=0, column=0, pady=20)
+            self._set_status("No results — check window size.")
+        else:
+            self._set_status(
+                f"Done — {len(stress_map)} signal(s) analysed."
+            )
 
         return stress_map
 
-    # ── Tab layout ─────────────────────────────────────────────────────────────
+    # ── Results area helpers ──────────────────────────────────────────────────
 
-    def _populate_signal_tab(
-        self, parent,
-        fig_box: plt.Figure,
-        fig_roc: plt.Figure,
-        model: StressModel,
+    def _clear_results(self):
+        for w in self._results_frame.winfo_children():
+            w.destroy()
+        for fig in self._figs:
+            plt.close(fig)
+        self._figs.clear()
+
+    def _add_section_header(
+        self,
         sig_name: str,
-        y_session: np.ndarray,
-        y_scores: np.ndarray,
         preds: np.ndarray,
-        y_phys: np.ndarray,
+        scores: np.ndarray,
+        model: StressModel,
+        row: int,
     ):
-        parent.grid_rowconfigure(1, weight=1)
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_columnconfigure(1, weight=1)
-
-        # ── Summary bar ────────────────────────────────────────────────────
-        summary = ctk.CTkFrame(parent, fg_color="transparent")
-        summary.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
-
+        """Coloured header bar with summary stats for one signal."""
+        from app.core.models import FEATURE_NAMES as FN
         n_stressed  = int(preds.sum())
         n_total     = len(preds)
-        # Agreement between physiological detection and session intervals
-        n_common    = min(len(preds), len(y_session))
-        agreement   = float((preds[:n_common] == y_session[:n_common]).mean()) if n_common else 0.0
-        importances = model.feature_importances()
-        top_idx     = int(np.argmax(importances))
+        top_idx     = int(np.argmax(model.feature_importances()))
+
+        frame = ctk.CTkFrame(self._results_frame, fg_color="#336699",
+                             corner_radius=8)
+        frame.grid(row=row, column=0, sticky="ew", padx=6, pady=(12, 2))
 
         ctk.CTkLabel(
-            summary,
-            text=(f"  {sig_name}  |  "
-                  f"Physio-stressed windows: {n_stressed}/{n_total}  |  "
-                  f"Agreement with session: {agreement:.1%}  |  "
-                  f"Top feature: {FEATURE_NAMES[top_idx]}"),
-            font=("Arial", 11),
-        ).pack(side="left")
+            frame,
+            text=(f"  {sig_name}   ·   "
+                  f"Stressed windows: {n_stressed} / {n_total}   ·   "
+                  f"Mean stress prob: {scores.mean():.2f}   ·   "
+                  f"Top feature: {FN[top_idx]}"),
+            font=("Arial", 11, "bold"),
+            text_color="white",
+        ).pack(side="left", padx=8, pady=6)
 
-        # ── Boxplots (left) ────────────────────────────────────────────────
-        frame_box = ctk.CTkFrame(parent)
-        frame_box.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
-        frame_box.grid_rowconfigure(1, weight=1)
-        frame_box.grid_columnconfigure(0, weight=1)
+    def _add_plot(self, title: str, fig: plt.Figure, row: int):
+        """Embed a matplotlib figure with a title and toolbar."""
+        self._figs.append(fig)
 
-        ctk.CTkLabel(frame_box, text="Feature Distributions",
-                     font=("Arial", 11, "bold")).grid(row=0, column=0, pady=4)
-        self._embed_figure(frame_box, fig_box, row=1)
+        card = ctk.CTkFrame(self._results_frame, corner_radius=8)
+        card.grid(row=row, column=0, sticky="ew", padx=6, pady=4)
+        card.grid_columnconfigure(0, weight=1)
 
-        # ── ROC curve (right) ─────────────────────────────────────────────
-        frame_roc = ctk.CTkFrame(parent)
-        frame_roc.grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
-        frame_roc.grid_rowconfigure(1, weight=1)
-        frame_roc.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(card, text=title,
+                     font=("Arial", 11, "bold")).grid(
+            row=0, column=0, sticky="w", padx=10, pady=(8, 2))
 
-        ctk.CTkLabel(frame_roc, text="ROC Curve",
-                     font=("Arial", 11, "bold")).grid(row=0, column=0, pady=4)
-        self._embed_figure(frame_roc, fig_roc, row=1)
-
-    @staticmethod
-    def _embed_figure(parent, fig: plt.Figure, row: int = 0):
-        canvas = FigureCanvasTkAgg(fig, master=parent)
+        canvas = FigureCanvasTkAgg(fig, master=card)
         canvas.draw()
-        widget = canvas.get_tk_widget()
-        widget.grid(row=row, column=0, sticky="nsew")
+        canvas.get_tk_widget().grid(row=1, column=0, sticky="ew", padx=6)
 
-        toolbar_frame = ctk.CTkFrame(parent, fg_color="transparent", height=28)
-        toolbar_frame.grid(row=row + 1, column=0, sticky="ew")
-        tb = NavigationToolbar2Tk(canvas, toolbar_frame)
+        tb_frame = ctk.CTkFrame(card, fg_color="transparent", height=26)
+        tb_frame.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 6))
+        tb = NavigationToolbar2Tk(canvas, tb_frame)
         tb.update()
         tb.pack(side="left")
 
+    def _set_status(self, msg: str):
+        if self._status_var:
+            self._status_var.set(msg)
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+
+# ── Helper ────────────────────────────────────────────────────────────────────
 
 def _split_by_phase(
     X: np.ndarray,
@@ -213,7 +489,6 @@ def _split_by_phase(
     calming_intervals: list[tuple[float, float]],
     stress_intervals: list[tuple[float, float]],
 ) -> dict[str, np.ndarray]:
-    """Split feature matrix X into calming / stressed / baseline subsets."""
     mask_calm = np.zeros(len(t_centers), dtype=bool)
     for s, e in calming_intervals:
         mask_calm |= (t_centers >= s) & (t_centers <= e)
@@ -223,9 +498,10 @@ def _split_by_phase(
         mask_stress |= (t_centers >= s) & (t_centers <= e)
 
     mask_base = ~mask_calm & ~mask_stress
+    ncols = X.shape[1] if X.ndim == 2 else 1
 
     return {
-        "Baseline": X[mask_base]  if mask_base.any()   else np.empty((0, X.shape[1])),
-        "Calming":  X[mask_calm]  if mask_calm.any()   else np.empty((0, X.shape[1])),
-        "Stress":   X[mask_stress] if mask_stress.any() else np.empty((0, X.shape[1])),
+        "Baseline": X[mask_base]   if mask_base.any()   else np.empty((0, ncols)),
+        "Calming":  X[mask_calm]   if mask_calm.any()   else np.empty((0, ncols)),
+        "Stress":   X[mask_stress] if mask_stress.any() else np.empty((0, ncols)),
     }

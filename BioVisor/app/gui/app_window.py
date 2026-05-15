@@ -238,36 +238,23 @@ class AppWindow(ctk.CTk):
             messagebox.showinfo("No data", "Load a subject before running analysis.")
             return
 
-        phase_intervals = self._read_phase_intervals()
+        phase_intervals   = self._read_phase_intervals()
         calming_intervals = phase_intervals.get("calming", [])
-        stress_intervals  = phase_intervals.get("vexing", [])
+        stress_intervals  = phase_intervals.get("vexing",  [])
 
-        if not stress_intervals:
-            messagebox.showwarning(
-                "No stress interval",
-                "Enter at least the Stress start/end times before running analysis."
-            )
-            return
-
-        self._set_status("Running analysis…")
-        self.update_idletasks()
-
-        self._stress_map = self._analysis.run_analysis(
+        # Load data into analysis window and switch tab —
+        # the user presses Run inside the Analysis tab to execute
+        self._analysis.load_data(
             self._signals,
             self._cfg.get("fs", {}),
             stress_intervals,
             calming_intervals,
         )
-
         self._tabs.set("Analysis")
         self._set_status(
-            f"Analysis complete\n"
-            f"Signals analysed: {', '.join(self._stress_map.keys())}"
+            f"Data loaded into Analysis tab.\n"
+            f"Select plots and press ▶ Run analysis."
         )
-
-        # Auto-refresh viewer with stress overlay
-        if self._stress_map:
-            self._update_viewer()
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
