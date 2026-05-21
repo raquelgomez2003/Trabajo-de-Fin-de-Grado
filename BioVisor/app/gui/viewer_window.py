@@ -6,7 +6,6 @@ predicted-stress markers, and ECG BPM overlay.
 
 from __future__ import annotations
 import customtkinter as ctk
-from tkinter import messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
@@ -14,15 +13,10 @@ from app.core.plotter import plot_signals_with_stress
 
 
 class ViewerWindow(ctk.CTkFrame):
-    """
-    Embedded frame (used as a tab inside AppWindow).
-    Receives signals, fs_map, phase_intervals, stress_map, bpm_data
-    and renders the viewer figure.
-    """
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
-        self._canvas = None
+        self._canvas  = None
         self._toolbar = None
         self._fig: plt.Figure | None = None
         self._build()
@@ -31,44 +25,27 @@ class ViewerWindow(ctk.CTkFrame):
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Toolbar frame (matplotlib nav)
         self._frame_toolbar = ctk.CTkFrame(self, height=36, fg_color="transparent")
         self._frame_toolbar.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
 
-        # Plot area
         self._frame_plot = ctk.CTkFrame(self)
         self._frame_plot.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
         self._frame_plot.grid_rowconfigure(0, weight=1)
         self._frame_plot.grid_columnconfigure(0, weight=1)
 
-        # Placeholder
-        ctk.CTkLabel(
-            self._frame_plot,
-            text="Load a subject to display signals.",
-            text_color="gray", font=("Arial", 13),
-        ).grid(row=0, column=0)
+        ctk.CTkLabel(self._frame_plot, text="Load a subject to display signals.",
+                     text_color="gray", font=("Arial", 13)).grid(row=0, column=0)
 
-    # ── Public ────────────────────────────────────────────────────────────────
-
-    def render(
-        self,
-        signals: dict,
-        fs_map: dict,
-        phase_intervals: dict,
-        stress_map: dict,
-        bpm_data=None,
-        rr_data=None,
-    ):
+    def render(self, signals: dict, fs_map: dict, phase_intervals: dict,
+               stress_map: dict, bpm_data=None, rr_data=None):
         """Draw (or redraw) the viewer figure."""
         self._clear()
-
         self._fig = plot_signals_with_stress(
             signals, fs_map, phase_intervals, stress_map, bpm_data, rr_data
         )
         self._canvas = FigureCanvasTkAgg(self._fig, master=self._frame_plot)
         self._canvas.draw()
-        widget = self._canvas.get_tk_widget()
-        widget.grid(row=0, column=0, sticky="nsew")
+        self._canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
         self._toolbar = NavigationToolbar2Tk(self._canvas, self._frame_toolbar)
         self._toolbar.update()
@@ -88,6 +65,5 @@ class ViewerWindow(ctk.CTkFrame):
         if self._fig:
             plt.close(self._fig)
             self._fig = None
-        # Remove placeholder label if present
         for w in self._frame_plot.winfo_children():
             w.destroy()

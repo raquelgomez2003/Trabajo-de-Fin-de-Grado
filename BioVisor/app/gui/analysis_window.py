@@ -6,13 +6,12 @@ Layout
 ------
   Left panel (fixed 240 px):
     · Signal checkboxes      — which signals to analyse
-    · Plot type checkboxes   — Boxplots / ROC / Feature importance / Stress timeline
-    · Feature selector       — which of the 12 features to include in boxplots
+    · Plot type checkboxes   — Boxplots / ROC / Feature importance / Stress timeline / RR detail
     · Window / step entries  — override default RF window size
     · [Run] button
 
   Right area (scrollable):
-    · One collapsible section per selected signal × selected plot type
+    · One tab per selected signal × selected plot type
 """
 
 from __future__ import annotations
@@ -28,26 +27,26 @@ from app.core.models import (
     extract_features_windowed,
     build_labels_from_intervals,
     build_physiological_labels,
+    compute_rr,
     FEATURE_NAMES,
     FEATURE_DIM,
-    HRV_FEATURE_NAMES,
 )
 from app.core.config import RF_WINDOW_SEC, RF_STEP_SEC
 from app.core.plotter import plot_boxplots, plot_roc
 
 
-# ── Extra plot functions (defined here to keep plotter.py clean) ──────────────
+# ── Extra plot functions ──────────────────────────────────────────────────────
 
 def _plot_feature_importance(model: StressModel, sig_name: str,
                               feature_names: list[str]) -> plt.Figure:
     """Horizontal bar chart of feature importances."""
-    imp  = model.feature_importances()
-    idx  = np.argsort(imp)
+    imp   = model.feature_importances()
+    idx   = np.argsort(imp)
     names = [feature_names[i] for i in idx]
     vals  = imp[idx]
 
     fig, ax = plt.subplots(figsize=(5, max(3, len(names) * 0.4)))
-    bars = ax.barh(names, vals, color="#2255aa", alpha=0.75)
+    ax.barh(names, vals, color="#2255aa", alpha=0.75)
     ax.set_xlabel("Importance", fontsize=9)
     ax.set_title(f"Feature importance — {sig_name}", fontsize=10, fontweight="bold")
     ax.grid(True, axis="x", alpha=0.3)
@@ -72,20 +71,16 @@ def _plot_stress_timeline(
     for s, e in stress_intervals:
         ax.axvspan(s, e, color="#ffb3b3", alpha=0.4, label="Session stress interval")
 
-    # Mark predicted-stress windows
     stressed_t = t_centers[preds == 1]
     if len(stressed_t):
         ax.scatter(stressed_t, np.full(len(stressed_t), 0.02),
-                   color="#cc0000", marker="|", s=40, zorder=5,
-                   label="Predicted stress")
+                   color="#cc0000", marker="|", s=40, zorder=5, label="Predicted stress")
 
     ax.set_ylim(0, 1.05)
     ax.set_xlabel("Time (s)", fontsize=9)
     ax.set_ylabel("P(stress)", fontsize=9)
-    ax.set_title(f"Stress probability over time — {sig_name}",
-                 fontsize=10, fontweight="bold")
+    ax.set_title(f"Stress probability over time — {sig_name}", fontsize=10, fontweight="bold")
 
-    # Deduplicate legend
     handles, labels = ax.get_legend_handles_labels()
     seen = {}
     for h, l in zip(handles, labels):
@@ -96,45 +91,118 @@ def _plot_stress_timeline(
     return fig
 
 
+def _plot_rr_detail(
+    ecg_signal: np.ndarray,
+    fs: float,
+    stress_intervals: list[tuple[float, float]],
+    calming_intervals: list[tuple[float, float]],
+) -> plt.Figure:
+    """
+    Detailed RR interval plot for the analysis tab.
+    Shows beat-by-beat RR in ms with:
+      - Phase shading (calming / stress)
+      - Mean RR per phase annotated
+      - RMSSD per phase annotated
+      - Short RR points highlighted in red
+    """
+    from app.core.models import compute_rr
+
+    rr_times, rr_ms = compute_rr(ecg_signal, fs)
+
+    fig, ax = plt.subplots(figsize=(11, 3.5))
+
+    if len(rr_times) == 0:
+        ax.text(0.5, 0.5, "No RR intervals detected — check ECG signal",
+                ha="center", va="center")
+        ax.set_title("RR interval detail")
+        fig.tight_layout()
+        return fig
+
+    # Base RR line
+    ax.plot(rr_times, rr_ms, color="#9933aa", lw=0.9, zorder=3, label="RR interval")
+
+    # Global mean and stress threshold
+    rr_mean    = np.mean(rr_ms)
+    low_thresh = rr_mean - np.std(rr_ms)
+    ax.axhline(rr_mean,    color="#777777", lw=1.0, ls="--",
+               label=f"Global mean {rr_mean:.0f} ms")
+    ax.axhline(low_thresh, color="#cc0000", lw=0.9, ls=":",
+               label=f"Stress threshold {low_thresh:.0f} ms")
+
+    # Highlight short RR points (fast HR = potential stress)
+    mask = rr_ms < low_thresh
+    if mask.any():
+        ax.scatter(rr_times[mask], rr_ms[mask],
+                   color="#cc0000", s=12, zorder=5, label="Short RR (stress)")
+
+    # Shade calming phases and annotate RMSSD + mean RR
+    for s, e in calming_intervals:
+        ax.axvspan(s, e, color="#b6f0c8", alpha=0.35, zorder=0)
+        phase_mask = (rr_times >= s) & (rr_times <= e)
+        if phase_mask.sum() > 2:
+            rmssd = float(np.sqrt(np.mean(np.diff(rr_ms[phase_mask]) ** 2)))
+            mean  = float(np.mean(rr_ms[phase_mask]))
+            ax.text((s + e) / 2, ax.get_ylim()[1] if ax.get_ylim()[1] != 0 else rr_mean + 50,
+                    f"Calming\nmean {mean:.0f} ms\nRMSSD {rmssd:.1f}",
+                    ha="center", va="top", fontsize=7, color="#1a6b3a",
+                    bbox=dict(fc="white", alpha=0.6, ec="none"))
+
+    # Shade stress phases and annotate RMSSD + mean RR
+    for s, e in stress_intervals:
+        ax.axvspan(s, e, color="#ffb3b3", alpha=0.35, zorder=0)
+        phase_mask = (rr_times >= s) & (rr_times <= e)
+        if phase_mask.sum() > 2:
+            rmssd = float(np.sqrt(np.mean(np.diff(rr_ms[phase_mask]) ** 2)))
+            mean  = float(np.mean(rr_ms[phase_mask]))
+            ax.text((s + e) / 2, ax.get_ylim()[1] if ax.get_ylim()[1] != 0 else rr_mean + 50,
+                    f"Stress\nmean {mean:.0f} ms\nRMSSD {rmssd:.1f}",
+                    ha="center", va="top", fontsize=7, color="#aa2222",
+                    bbox=dict(fc="white", alpha=0.6, ec="none"))
+
+    ax.set_xlabel("Time (s)", fontsize=9)
+    ax.set_ylabel("RR interval (ms)", fontsize=9)
+    ax.set_title("RR interval detail — short RR = fast HR = potential stress",
+                 fontsize=10, fontweight="bold")
+    ax.invert_yaxis()  # short RR at top = more intuitive
+    ax.legend(fontsize=8, loc="upper right", framealpha=0.7)
+    ax.grid(True, alpha=0.22)
+    fig.tight_layout()
+    return fig
+
+
 # ── Main analysis window ──────────────────────────────────────────────────────
 
 class AnalysisWindow(ctk.CTkFrame):
     """
     Embedded frame used as a tab inside AppWindow.
-    Exposes a left control panel; results appear on the right after [Run].
     Call load_data(signals, fs_map, stress_intervals, calming_intervals)
     to populate the signal checkboxes before the user presses Run.
     """
 
-    # Available plot types
     PLOT_TYPES = [
         ("Boxplots",           "boxplots"),
         ("ROC curve",          "roc"),
         ("Feature importance", "importance"),
         ("Stress timeline",    "timeline"),
+        ("RR detail",          "rr_detail"),
     ]
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         self._figs: list[plt.Figure] = []
 
-        # Data cache (set by load_data)
-        self._signals:           dict[str, np.ndarray]        = {}
-        self._fs_map:            dict[str, float]             = {}
-        self._stress_intervals:  list[tuple[float, float]]    = []
-        self._calming_intervals: list[tuple[float, float]]    = []
+        self._signals:           dict[str, np.ndarray]     = {}
+        self._fs_map:            dict[str, float]          = {}
+        self._stress_intervals:  list[tuple[float, float]] = []
+        self._calming_intervals: list[tuple[float, float]] = []
 
-        # Control vars (built in _build_controls)
-        self._sig_vars:      dict[str, ctk.BooleanVar] = {}
-        self._plot_vars:     dict[str, ctk.BooleanVar] = {}
-        self._feat_vars:     dict[str, ctk.BooleanVar] = {}
-        self._window_var:    ctk.StringVar | None = None
-        self._step_var:      ctk.StringVar | None = None
-        self._status_var:    ctk.StringVar | None = None
+        self._sig_vars:   dict[str, ctk.BooleanVar] = {}
+        self._plot_vars:  dict[str, ctk.BooleanVar] = {}
+        self._window_var: ctk.StringVar | None = None
+        self._step_var:   ctk.StringVar | None = None
+        self._status_var: ctk.StringVar | None = None
 
-        # Results area
         self._results_frame: ctk.CTkScrollableFrame | None = None
-
         self._build_layout()
 
     # ── Layout ────────────────────────────────────────────────────────────────
@@ -143,29 +211,24 @@ class AnalysisWindow(ctk.CTkFrame):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # Left control panel
         self._ctrl = ctk.CTkScrollableFrame(self, width=230)
         self._ctrl.grid(row=0, column=0, sticky="ns", padx=(6, 2), pady=6)
-
         ctk.CTkLabel(self._ctrl, text="Analysis controls",
                      font=("Arial", 13, "bold")).pack(anchor="w", pady=(8, 4))
-
         self._build_controls()
 
-        # Right results area (scrollable)
-        self._results_frame = ctk.CTkScrollableFrame(self)
+        self._results_frame = ctk.CTkFrame(self)
         self._results_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 6), pady=6)
         self._results_frame.grid_columnconfigure(0, weight=1)
-
+        self._results_frame.grid_rowconfigure(0, weight=1)
         ctk.CTkLabel(self._results_frame,
                      text="Configure the controls on the left and press Run.",
                      text_color="gray", font=("Arial", 13)).pack(pady=40)
 
     def _build_controls(self):
-        """Build all widgets in the left panel."""
         ctrl = self._ctrl
 
-        # ── Signals ───────────────────────────────────────────────────────
+        # Signals
         self._sig_section = ctk.CTkFrame(ctrl, fg_color="transparent")
         self._sig_section.pack(fill="x", pady=(0, 6))
         ctk.CTkLabel(self._sig_section, text="Signals to analyse",
@@ -173,7 +236,7 @@ class AnalysisWindow(ctk.CTkFrame):
         ctk.CTkLabel(self._sig_section, text="(load a subject first)",
                      text_color="gray", font=("Arial", 10)).pack(anchor="w")
 
-        # ── Plot types ────────────────────────────────────────────────────
+        # Plot types
         ctk.CTkLabel(ctrl, text="Plot types",
                      font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 2))
         self._plot_vars = {}
@@ -183,42 +246,18 @@ class AnalysisWindow(ctk.CTkFrame):
             ctk.CTkCheckBox(ctrl, text=label, variable=var,
                             font=("Arial", 11)).pack(anchor="w", padx=4, pady=1)
 
-        # ── Features for boxplots ─────────────────────────────────────────
-        ctk.CTkLabel(ctrl, text="Features (boxplots)",
-                     font=("Arial", 11, "bold")).pack(anchor="w", pady=(10, 2))
-
-        feat_scroll = ctk.CTkScrollableFrame(ctrl, height=160)
-        feat_scroll.pack(fill="x", padx=2)
-        self._feat_vars = {}
-        for name in FEATURE_NAMES:
-            var = ctk.BooleanVar(value=True)
-            self._feat_vars[name] = var
-            ctk.CTkCheckBox(feat_scroll, text=name, variable=var,
-                            font=("Arial", 10)).pack(anchor="w", pady=1)
-
-        # Select / deselect all features
-        btn_row = ctk.CTkFrame(ctrl, fg_color="transparent")
-        btn_row.pack(fill="x", pady=(2, 0))
-        ctk.CTkButton(btn_row, text="All", width=60, height=24,
-                      command=lambda: self._set_all_feats(True)).pack(side="left", padx=2)
-        ctk.CTkButton(btn_row, text="None", width=60, height=24,
-                      fg_color="transparent", border_width=1,
-                      command=lambda: self._set_all_feats(False)).pack(side="left", padx=2)
-
-        # ── Window / step ─────────────────────────────────────────────────
+        # Window / step
         ctk.CTkLabel(ctrl, text="Window size (s)",
                      font=("Arial", 11, "bold")).pack(anchor="w", pady=(10, 2))
         self._window_var = ctk.StringVar(value=str(RF_WINDOW_SEC))
-        ctk.CTkEntry(ctrl, textvariable=self._window_var,
-                     height=28).pack(fill="x", padx=4)
+        ctk.CTkEntry(ctrl, textvariable=self._window_var, height=28).pack(fill="x", padx=4)
 
         ctk.CTkLabel(ctrl, text="Step size (s)",
                      font=("Arial", 11, "bold")).pack(anchor="w", pady=(6, 2))
         self._step_var = ctk.StringVar(value=str(RF_STEP_SEC))
-        ctk.CTkEntry(ctrl, textvariable=self._step_var,
-                     height=28).pack(fill="x", padx=4)
+        ctk.CTkEntry(ctrl, textvariable=self._step_var, height=28).pack(fill="x", padx=4)
 
-        # ── Run ───────────────────────────────────────────────────────────
+        # Run button
         ctk.CTkButton(ctrl, text="▶  Run analysis",
                       height=38, fg_color="#336699", hover_color="#224477",
                       command=self._run).pack(fill="x", padx=4, pady=(14, 4))
@@ -237,28 +276,15 @@ class AnalysisWindow(ctk.CTkFrame):
         stress_intervals: list[tuple[float, float]],
         calming_intervals: list[tuple[float, float]],
     ) -> None:
-        """Called by AppWindow after loading a subject. Refreshes signal checkboxes."""
         self._signals           = signals
         self._fs_map            = fs_map
         self._stress_intervals  = stress_intervals
         self._calming_intervals = calming_intervals
         self._refresh_signal_checkboxes()
 
-    def run_analysis(
-        self,
-        signals: dict[str, np.ndarray],
-        fs_map: dict[str, float],
-        stress_intervals: list[tuple[float, float]],
-        calming_intervals: list[tuple[float, float]],
-    ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        """Compatibility shim: load data then run immediately."""
-        self.load_data(signals, fs_map, stress_intervals, calming_intervals)
-        return self._run()
-
     # ── Control helpers ───────────────────────────────────────────────────────
 
     def _refresh_signal_checkboxes(self):
-        """Rebuild signal checkboxes whenever a new subject is loaded."""
         for w in self._sig_section.winfo_children():
             w.destroy()
         ctk.CTkLabel(self._sig_section, text="Signals to analyse",
@@ -272,20 +298,11 @@ class AnalysisWindow(ctk.CTkFrame):
         if self._status_var:
             self._status_var.set(f"{len(self._signals)} signal(s) ready.")
 
-    def _set_all_feats(self, value: bool):
-        for var in self._feat_vars.values():
-            var.set(value)
-
     def _selected_signals(self) -> list[str]:
         return [s for s, v in self._sig_vars.items() if v.get()]
 
     def _selected_plots(self) -> set[str]:
         return {k for k, v in self._plot_vars.items() if v.get()}
-
-    def _selected_features(self) -> list[int]:
-        """Return indices of selected features."""
-        return [i for i, name in enumerate(FEATURE_NAMES)
-                if self._feat_vars.get(name, ctk.BooleanVar(value=True)).get()]
 
     def _get_window_step(self) -> tuple[float, float]:
         try:
@@ -299,12 +316,10 @@ class AnalysisWindow(ctk.CTkFrame):
     # ── Run ───────────────────────────────────────────────────────────────────
 
     def _run(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        """Execute analysis with current control settings."""
         self._clear_results()
 
         selected_sigs  = self._selected_signals()
         selected_plots = self._selected_plots()
-        feat_indices   = self._selected_features()
         window_sec, step_sec = self._get_window_step()
 
         if not selected_sigs:
@@ -322,16 +337,26 @@ class AnalysisWindow(ctk.CTkFrame):
 
         signals = {s: self._signals[s] for s in selected_sigs if s in self._signals}
 
-        # Physiological labels (multi-signal majority vote)
         t_phys, y_phys = build_physiological_labels(
             signals, self._fs_map, window_sec, step_sec
         )
 
-        # Feature names for selected subset
-        sel_feat_names = [FEATURE_NAMES[i] for i in feat_indices] if feat_indices else FEATURE_NAMES
-
         stress_map: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        row_idx = 0
+
+        tab_view = ctk.CTkTabview(self._results_frame)
+        tab_view.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        self._results_frame.grid_rowconfigure(0, weight=1)
+
+        tabs: dict[str, ctk.CTkScrollableFrame] = {}
+        for sig_name in selected_sigs:
+            if sig_name in signals:
+                tab_view.add(sig_name)
+                scroll = ctk.CTkScrollableFrame(tab_view.tab(sig_name))
+                scroll.pack(fill="both", expand=True)
+                scroll.grid_columnconfigure(0, weight=1)
+                tabs[sig_name] = scroll
+
+        row_per_tab: dict[str, int] = {s: 0 for s in tabs}
 
         for sig_name in selected_sigs:
             if sig_name not in signals:
@@ -344,12 +369,12 @@ class AnalysisWindow(ctk.CTkFrame):
             if len(X_all) == 0:
                 continue
 
-            n_win   = min(len(X_all), len(t_phys))
+            n_win = min(len(X_all), len(t_phys))
             if n_win == 0:
                 continue
+
             X_train = X_all[:n_win]
             y_train = y_phys[:n_win]
-
             if len(np.unique(y_train)) < 2:
                 continue
 
@@ -359,65 +384,63 @@ class AnalysisWindow(ctk.CTkFrame):
             scores = model.predict_proba(X_all)
             stress_map[sig_name] = (t_centers, preds)
 
-            y_session = build_labels_from_intervals(t_centers, self._stress_intervals)
+            y_session  = build_labels_from_intervals(t_centers, self._stress_intervals)
             phase_feats = _split_by_phase(
                 X_all, t_centers,
                 self._calming_intervals, self._stress_intervals
             )
 
-            # ── Section header ────────────────────────────────────────────
-            self._add_section_header(sig_name, preds, scores, model, row_idx)
-            row_idx += 1
+            parent = tabs[sig_name]
+            row    = row_per_tab[sig_name]
 
-            # ── Selected plots ────────────────────────────────────────────
+            self._add_section_header_in(parent, sig_name, preds, scores, model, row)
+            row += 1
+
             if "boxplots" in selected_plots:
-                # Filter to selected features
-                if feat_indices and len(feat_indices) < FEATURE_DIM:
-                    phase_feats_sel = {
-                        ph: X[:, feat_indices] if X.ndim == 2 and X.shape[1] >= FEATURE_DIM
-                            else X
-                        for ph, X in phase_feats.items()
-                    }
-                else:
-                    phase_feats_sel = phase_feats
-
-                fig = plot_boxplots(phase_feats_sel, sig_name, sel_feat_names)
-                self._add_plot(f"Feature distributions — {sig_name}", fig, row_idx)
-                row_idx += 1
+                fig = plot_boxplots(phase_feats, sig_name)
+                self._add_plot_in(parent, "Feature distributions", fig, row)
+                row += 1
 
             if "roc" in selected_plots:
                 fig = plot_roc(y_session, scores, sig_name)
-                self._add_plot(f"ROC curve — {sig_name}", fig, row_idx)
-                row_idx += 1
+                self._add_plot_in(parent, "ROC curve", fig, row)
+                row += 1
 
             if "importance" in selected_plots:
                 fig = _plot_feature_importance(model, sig_name, FEATURE_NAMES)
-                self._add_plot(f"Feature importance — {sig_name}", fig, row_idx)
-                row_idx += 1
+                self._add_plot_in(parent, "Feature importance", fig, row)
+                row += 1
 
             if "timeline" in selected_plots:
                 fig = _plot_stress_timeline(
                     t_centers, preds, scores, sig_name, self._stress_intervals
                 )
-                self._add_plot(f"Stress timeline — {sig_name}", fig, row_idx)
-                row_idx += 1
+                self._add_plot_in(parent, "Stress timeline", fig, row)
+                row += 1
+
+            if "rr_detail" in selected_plots and sig_name == "ECG":
+                fig = _plot_rr_detail(
+                    signals[sig_name], fs,
+                    self._stress_intervals, self._calming_intervals
+                )
+                self._add_plot_in(parent, "RR interval detail", fig, row)
+                row += 1
+
+            row_per_tab[sig_name] = row
 
         if not stress_map:
             ctk.CTkLabel(
                 self._results_frame,
-                text="Not enough data for analysis.\n"
-                     f"Signals need ≥ 2× the window size ({window_sec:.0f} s).",
+                text=f"Not enough data.\nSignals need ≥ 2× window size ({window_sec:.0f} s).",
                 text_color="#cc4400", font=("Arial", 12),
             ).grid(row=0, column=0, pady=20)
             self._set_status("No results — check window size.")
         else:
-            self._set_status(
-                f"Done — {len(stress_map)} signal(s) analysed."
-            )
+            self._set_status(f"Done — {len(stress_map)} signal(s) analysed.")
 
         return stress_map
 
-    # ── Results area helpers ──────────────────────────────────────────────────
+    # ── Results helpers ───────────────────────────────────────────────────────
 
     def _clear_results(self):
         for w in self._results_frame.winfo_children():
@@ -425,40 +448,27 @@ class AnalysisWindow(ctk.CTkFrame):
         for fig in self._figs:
             plt.close(fig)
         self._figs.clear()
+        self._results_frame.grid_rowconfigure(0, weight=1)
 
-    def _add_section_header(
-        self,
-        sig_name: str,
-        preds: np.ndarray,
-        scores: np.ndarray,
-        model: StressModel,
-        row: int,
-    ):
-        """Coloured header bar with summary stats for one signal."""
-        from app.core.models import FEATURE_NAMES as FN
-        n_stressed  = int(preds.sum())
-        n_total     = len(preds)
-        top_idx     = int(np.argmax(model.feature_importances()))
+    def _add_section_header_in(self, parent, sig_name, preds, scores, model, row):
+        n_stressed = int(preds.sum())
+        n_total    = len(preds)
+        top_idx    = int(np.argmax(model.feature_importances()))
 
-        frame = ctk.CTkFrame(self._results_frame, fg_color="#336699",
-                             corner_radius=8)
-        frame.grid(row=row, column=0, sticky="ew", padx=6, pady=(12, 2))
-
+        frame = ctk.CTkFrame(parent, fg_color="#336699", corner_radius=8)
+        frame.grid(row=row, column=0, sticky="ew", padx=6, pady=(8, 2))
         ctk.CTkLabel(
             frame,
-            text=(f"  {sig_name}   ·   "
-                  f"Stressed windows: {n_stressed} / {n_total}   ·   "
+            text=(f"  Stressed windows: {n_stressed} / {n_total}   ·   "
                   f"Mean stress prob: {scores.mean():.2f}   ·   "
-                  f"Top feature: {FN[top_idx]}"),
+                  f"Top feature: {FEATURE_NAMES[top_idx]}"),
             font=("Arial", 11, "bold"),
             text_color="white",
         ).pack(side="left", padx=8, pady=6)
 
-    def _add_plot(self, title: str, fig: plt.Figure, row: int):
-        """Embed a matplotlib figure with a title and toolbar."""
+    def _add_plot_in(self, parent, title: str, fig: plt.Figure, row: int):
         self._figs.append(fig)
-
-        card = ctk.CTkFrame(self._results_frame, corner_radius=8)
+        card = ctk.CTkFrame(parent, corner_radius=8)
         card.grid(row=row, column=0, sticky="ew", padx=6, pady=4)
         card.grid_columnconfigure(0, weight=1)
 
@@ -489,16 +499,16 @@ def _split_by_phase(
     calming_intervals: list[tuple[float, float]],
     stress_intervals: list[tuple[float, float]],
 ) -> dict[str, np.ndarray]:
-    mask_calm = np.zeros(len(t_centers), dtype=bool)
-    for s, e in calming_intervals:
-        mask_calm |= (t_centers >= s) & (t_centers <= e)
-
+    mask_calm   = np.zeros(len(t_centers), dtype=bool)
     mask_stress = np.zeros(len(t_centers), dtype=bool)
+
+    for s, e in calming_intervals:
+        mask_calm   |= (t_centers >= s) & (t_centers <= e)
     for s, e in stress_intervals:
         mask_stress |= (t_centers >= s) & (t_centers <= e)
 
     mask_base = ~mask_calm & ~mask_stress
-    ncols = X.shape[1] if X.ndim == 2 else 1
+    ncols     = X.shape[1] if X.ndim == 2 else 1
 
     return {
         "Baseline": X[mask_base]   if mask_base.any()   else np.empty((0, ncols)),

@@ -1,11 +1,6 @@
 """
 app_window.py
 Main application window — orchestrates setup, viewer, and analysis.
-
-Layout
-------
-  Left panel  : subject selector + phase interval inputs + Run Analysis button
-  Right area  : CTkTabview with [Signal Viewer] and [Analysis] tabs
 """
 
 from __future__ import annotations
@@ -14,10 +9,8 @@ import customtkinter as ctk
 from tkinter import messagebox
 import matplotlib.pyplot as plt
 
-from app.core.config import RF_WINDOW_SEC, RF_STEP_SEC
-from app.core.data_loader import load_subject_folder, time_axis
+from app.core.data_loader import load_subject_folder
 from app.core.models import compute_bpm, compute_rr
-
 from app.gui.setup_window import SetupWindow
 from app.gui.viewer_window import ViewerWindow
 from app.gui.analysis_window import AnalysisWindow
@@ -27,33 +20,37 @@ ctk.set_default_color_theme("blue")
 
 
 class AppWindow(ctk.CTk):
-    """Root window of BioVisor."""
 
     def __init__(self):
         super().__init__()
+        import sys
+        from PIL import Image
+
         self.title("BioVisor — Biomedical Signal Viewer & Analyser")
+        if sys.platform == "win32":
+            self.iconbitmap("assets/logo.ico")
+        else:
+            img = Image.open("assets/logo.png")
+            self.iconphoto(True, ctk.CTkImage(img))
         self.geometry("1400x820")
         self.minsize(1100, 650)
 
-        # Session state (populated by SetupWindow)
-        self._cfg: dict        = {}
-        self._signals: dict    = {}
-        self._stress_map: dict = {}
-        self._current_subject: int | None = None
+        self._cfg:             dict        = {}
+        self._signals:         dict        = {}
+        self._stress_map:      dict        = {}
+        self._current_subject: int | None  = None
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        # Open setup immediately
         self.after(100, self._open_setup)
 
-    # ── UI construction ────────────────────────────────────────────────────────
+    # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # ── Left panel ──────────────────────────────────────────────────────
+        # Left panel
         self._left = ctk.CTkFrame(self, width=230)
         self._left.grid(row=0, column=0, sticky="ns", padx=(10, 4), pady=10)
         self._left.grid_propagate(False)
@@ -66,36 +63,21 @@ class AppWindow(ctk.CTk):
         ctk.CTkButton(self._left, text="⚙  New Session",
                       command=self._open_setup).pack(fill="x", padx=14, pady=4)
 
-        # Filter toggle
         self._filter_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            self._left,
-            text="Apply artifact filter",
-            variable=self._filter_var,
-            font=("Arial", 11),
-        ).pack(padx=14, pady=(4, 0), anchor="w")
+        ctk.CTkCheckBox(self._left, text="Apply artifact filter",
+                        variable=self._filter_var,
+                        font=("Arial", 11)).pack(padx=14, pady=(4, 0), anchor="w")
 
-        # Subject buttons (built dynamically after setup)
-        self._frame_subjects = ctk.CTkScrollableFrame(self._left, label_text="Subjects", height=180)
+        self._frame_subjects = ctk.CTkScrollableFrame(
+            self._left, label_text="Subjects", height=180)
         self._frame_subjects.pack(fill="x", padx=10, pady=(10, 6))
 
-        # Phase intervals
+        # Phase interval rows
         ctk.CTkLabel(self._left, text="Phase Intervals (seconds)",
                      font=("Arial", 11, "bold")).pack(pady=(10, 2))
 
-        def _phase_row(label, color):
-            f = ctk.CTkFrame(self._left, fg_color="transparent")
-            f.pack(fill="x", padx=10, pady=2)
-            ctk.CTkLabel(f, text=label, width=70,
-                         text_color=color).pack(side="left")
-            e1 = ctk.CTkEntry(f, width=58, placeholder_text="start")
-            e1.pack(side="left", padx=2)
-            e2 = ctk.CTkEntry(f, width=58, placeholder_text="end")
-            e2.pack(side="left", padx=2)
-            return e1, e2
-
-        self._e_calm_s, self._e_calm_e     = _phase_row("Calming", "#2a8a4a")
-        self._e_stress_s, self._e_stress_e = _phase_row("Stress",  "#aa2222")
+        self._e_calm_s,   self._e_calm_e   = self._phase_row("Calming", "#2a8a4a")
+        self._e_stress_s, self._e_stress_e = self._phase_row("Stress",  "#aa2222")
 
         ctk.CTkLabel(self._left, text="Relax = everything outside\nCalming & Stress",
                      font=("Arial", 9), text_color="gray").pack(pady=(0, 4))
@@ -110,35 +92,46 @@ class AppWindow(ctk.CTk):
                       command=self._reset_view).pack(fill="x", padx=14, pady=(4, 14))
 
         self._lbl_status = ctk.CTkLabel(self._left, text="No session loaded.",
-                                        text_color="gray", wraplength=200, font=("Arial", 10))
+                                        text_color="gray", wraplength=200,
+                                        font=("Arial", 10))
         self._lbl_status.pack(padx=10, pady=4)
 
-        # ── Right area (tabs) ────────────────────────────────────────────────
+        # Right tabs
         self._tabs = ctk.CTkTabview(self)
         self._tabs.grid(row=0, column=1, sticky="nsew", padx=(4, 10), pady=10)
         self._tabs.add("Signal Viewer")
         self._tabs.add("Analysis")
 
-        self._viewer = ViewerWindow(self._tabs.tab("Signal Viewer"))
+        self._viewer   = ViewerWindow(self._tabs.tab("Signal Viewer"))
         self._viewer.pack(fill="both", expand=True)
 
         self._analysis = AnalysisWindow(self._tabs.tab("Analysis"))
         self._analysis.pack(fill="both", expand=True)
 
-    # ── Setup ──────────────────────────────────────────────────────────────────
+    def _phase_row(self, label: str, color: str) -> tuple:
+        """Build a start/end entry row for a phase interval."""
+        f = ctk.CTkFrame(self._left, fg_color="transparent")
+        f.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(f, text=label, width=70, text_color=color).pack(side="left")
+        e1 = ctk.CTkEntry(f, width=58, placeholder_text="start")
+        e1.pack(side="left", padx=2)
+        e2 = ctk.CTkEntry(f, width=58, placeholder_text="end")
+        e2.pack(side="left", padx=2)
+        return e1, e2
+
+    # ── Setup ─────────────────────────────────────────────────────────────────
 
     def _open_setup(self):
         SetupWindow(self, on_confirm=self._on_setup_confirmed)
 
     def _on_setup_confirmed(self, cfg: dict):
-        self._cfg = cfg
-        self._signals = {}
-        self._stress_map = {}
+        self._cfg             = cfg
+        self._signals         = {}
+        self._stress_map      = {}
         self._current_subject = None
         self._rebuild_subject_buttons()
         self._set_status(
-            f"Session ready\n"
-            f"Device: {cfg['device']}\n"
+            f"Session ready\nDevice: {cfg['device']}\n"
             f"Subjects: {cfg['n_subjects']}\n"
             f"Signals: {', '.join(cfg['signals'])}"
         )
@@ -146,41 +139,37 @@ class AppWindow(ctk.CTk):
     def _rebuild_subject_buttons(self):
         for w in self._frame_subjects.winfo_children():
             w.destroy()
-        n = self._cfg.get("n_subjects", 0)
-        for i in range(1, n + 1):
+        for i in range(1, self._cfg.get("n_subjects", 0) + 1):
             ctk.CTkButton(
                 self._frame_subjects, text=f"Subject {i}",
                 command=lambda n=i: self._load_subject(n),
             ).pack(fill="x", pady=3)
 
-    # ── Subject loading ────────────────────────────────────────────────────────
+    # ── Subject loading ───────────────────────────────────────────────────────
 
     def _load_subject(self, num: int):
-        cfg = self._cfg
-        if not cfg:
+        if not self._cfg:
             messagebox.showinfo("No session", "Please configure a session first.")
             return
 
-        folder     = cfg["folder"]
-        device     = cfg["device"]
-        signals_to_load = cfg["signals"]
+        folder  = self._cfg["folder"]
+        device  = self._cfg["device"]
+        fs_map  = self._cfg.get("fs", {})
 
-        # Folder candidates — tried in order, first non-empty result wins
         candidates = [
             os.path.join(folder, f"Base1_Sujeto{num}", "Biopac data"),
             os.path.join(folder, f"Base1_Sujeto{num}"),
             os.path.join(folder, f"Subject{num}"),
             os.path.join(folder, f"S{num:02d}"),
-            folder,   # flat: everything in root
+            folder,
         ]
+
         loaded = {}
         for candidate in candidates:
             try:
                 loaded = load_subject_folder(
-                    candidate,
-                    device,
-                    signals_to_load,
-                    fs_map=self._cfg.get("fs", {}),
+                    candidate, device, self._cfg["signals"],
+                    fs_map=fs_map,
                     apply_filters=self._filter_var.get(),
                 )
                 if loaded:
@@ -197,79 +186,55 @@ class AppWindow(ctk.CTk):
         self._signals         = loaded
         self._current_subject = num
         self._stress_map      = {}
-
-        self._set_status(
-            f"Subject {num} loaded\n"
-            f"{len(loaded)} signal(s): {', '.join(loaded.keys())}"
-        )
+        self._set_status(f"Subject {num} loaded\n"
+                         f"{len(loaded)} signal(s): {', '.join(loaded.keys())}")
         self._update_viewer()
 
-    # ── Viewer update ──────────────────────────────────────────────────────────
+    # ── Viewer ────────────────────────────────────────────────────────────────
 
     def _update_viewer(self):
         if not self._signals:
             return
-
         phase_intervals = self._read_phase_intervals()
-        bpm_data = None
-        rr_data  = None
+        bpm_data, rr_data = None, None
         if "ECG" in self._signals:
             ecg_fs   = self._cfg.get("fs", {}).get("ECG", 2000)
             bpm_data = compute_bpm(self._signals["ECG"], ecg_fs)
             rr_data  = compute_rr(self._signals["ECG"],  ecg_fs)
-
         self._viewer.render(
-            self._signals,
-            self._cfg.get("fs", {}),
-            phase_intervals,
-            self._stress_map,
-            bpm_data,
-            rr_data,
+            self._signals, self._cfg.get("fs", {}),
+            phase_intervals, self._stress_map, bpm_data, rr_data,
         )
         self._tabs.set("Signal Viewer")
 
     def _reset_view(self):
         self._viewer.reset_view()
 
-    # ── Analysis ───────────────────────────────────────────────────────────────
+    # ── Analysis ──────────────────────────────────────────────────────────────
 
     def _run_analysis(self):
         if not self._signals:
             messagebox.showinfo("No data", "Load a subject before running analysis.")
             return
-
-        phase_intervals   = self._read_phase_intervals()
-        calming_intervals = phase_intervals.get("calming", [])
-        stress_intervals  = phase_intervals.get("vexing",  [])
-
-        # Load data into analysis window and switch tab —
-        # the user presses Run inside the Analysis tab to execute
+        phase_intervals = self._read_phase_intervals()
         self._analysis.load_data(
             self._signals,
             self._cfg.get("fs", {}),
-            stress_intervals,
-            calming_intervals,
+            phase_intervals.get("vexing",  []),
+            phase_intervals.get("calming", []),
         )
         self._tabs.set("Analysis")
-        self._set_status(
-            f"Data loaded into Analysis tab.\n"
-            f"Select plots and press ▶ Run analysis."
-        )
+        self._set_status("Data loaded into Analysis tab.\n"
+                         "Select plots and press ▶ Run analysis.")
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _read_phase_intervals(self) -> dict[str, list[tuple[float, float]]]:
-        """
-        Parse calming and stress fields.
-        Relax = every second of the recording NOT covered by calming or stress.
-        Signal duration is estimated from the longest loaded signal.
-        """
         calming, vexing = [], []
 
         def _parse(es, ee, target):
             try:
-                s = float(es.get())
-                e = float(ee.get())
+                s, e = float(es.get()), float(ee.get())
                 if e > s:
                     target.append((s, e))
             except ValueError:
@@ -278,17 +243,13 @@ class AppWindow(ctk.CTk):
         _parse(self._e_calm_s,   self._e_calm_e,   calming)
         _parse(self._e_stress_s, self._e_stress_e, vexing)
 
-        # Compute relax as everything else, up to the signal duration
         relax = []
         if self._signals:
             fs_map  = self._cfg.get("fs", {})
-            sig_dur = max(
-                len(sig) / fs_map.get(name, 2000)
-                for name, sig in self._signals.items()
-            )
-            occupied = sorted(calming + vexing, key=lambda x: x[0])
-            cursor = 0.0
-            for start, end in occupied:
+            sig_dur = max(len(sig) / fs_map.get(name, 2000)
+                          for name, sig in self._signals.items())
+            cursor  = 0.0
+            for start, end in sorted(calming + vexing, key=lambda x: x[0]):
                 if start > cursor:
                     relax.append((cursor, start))
                 cursor = max(cursor, end)
@@ -303,4 +264,4 @@ class AppWindow(ctk.CTk):
     def _on_close(self):
         plt.close("all")
         self.destroy()
-        os._exit(0)   # force-kill the process so VSCode terminal doesn't hang
+        os._exit(0)
