@@ -5,6 +5,7 @@ Main application window — orchestrates setup, viewer, and analysis.
 
 from __future__ import annotations
 import os
+import sys
 import customtkinter as ctk
 from tkinter import messagebox
 import matplotlib.pyplot as plt
@@ -27,7 +28,6 @@ class AppWindow(ctk.CTk):
         self.geometry("1400x820")
         self.minsize(1100, 650)
 
-        # Logo
         BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         ico = os.path.join(BASE_DIR, "assets", "logo.ico")
         if os.path.exists(ico):
@@ -141,93 +141,92 @@ class AppWindow(ctk.CTk):
 
     # ── Subject loading ───────────────────────────────────────────────────────
 
-def _load_subject(self, num: int):
-    if not self._cfg:
-        messagebox.showinfo("No session", "Please configure a session first.")
-        return
+    def _load_subject(self, num: int):
+        if not self._cfg:
+            messagebox.showinfo("No session", "Please configure a session first.")
+            return
 
-    folder = self._cfg["folder"]
-    device = self._cfg["device"]
-    fs_map = self._cfg.get("fs", {})
+        folder = self._cfg["folder"]
+        device = self._cfg["device"]
+        fs_map = self._cfg.get("fs", {})
 
-    # ── Popup de progreso ─────────────────────────────────────────────
-    popup = ctk.CTkToplevel(self)
-    popup.title(f"Loading Subject {num}")
-    popup.geometry("420x300")
-    popup.resizable(False, False)
-    popup.grab_set()
+        # Popup de progreso
+        popup = ctk.CTkToplevel(self)
+        popup.title(f"Loading Subject {num}")
+        popup.geometry("420x300")
+        popup.resizable(False, False)
+        popup.grab_set()
 
-    ctk.CTkLabel(popup, text=f"Loading Subject {num}…",
-                 font=("Arial", 13, "bold")).pack(pady=(16, 6))
+        ctk.CTkLabel(popup, text=f"Loading Subject {num}…",
+                     font=("Arial", 13, "bold")).pack(pady=(16, 6))
 
-    log_box = ctk.CTkTextbox(popup, width=380, height=200, font=("Courier", 10))
-    log_box.pack(padx=16, pady=(0, 16))
-    log_box.configure(state="disabled")
-
-    def _log(msg: str):
-        log_box.configure(state="normal")
-        log_box.insert("end", msg + "\n")
-        log_box.see("end")
+        log_box = ctk.CTkTextbox(popup, width=380, height=200, font=("Courier", 10))
+        log_box.pack(padx=16, pady=(0, 16))
         log_box.configure(state="disabled")
-        popup.update()
 
-    # ── Redirigir prints al popup ─────────────────────────────────────
-    import sys, io
+        def _log(msg: str):
+            log_box.configure(state="normal")
+            log_box.insert("end", msg + "\n")
+            log_box.see("end")
+            log_box.configure(state="disabled")
+            popup.update()
 
-    class _LogRedirect:
-        def write(self, msg):
-            if msg.strip():
-                _log(msg.strip())
-        def flush(self):
-            pass
+        # Redirigir prints al popup
+        class _LogRedirect:
+            def write(self, msg):
+                if msg.strip():
+                    _log(msg.strip())
+            def flush(self):
+                pass
 
-    old_stdout   = sys.stdout
-    sys.stdout   = _LogRedirect()
+        old_stdout = sys.stdout
+        sys.stdout = _LogRedirect()
 
-    # ── Carga ─────────────────────────────────────────────────────────
-    candidates = [
-        os.path.join(folder, f"Base1_Sujeto{num}", "Biopac data"),
-        os.path.join(folder, f"Base1_Sujeto{num}"),
-        os.path.join(folder, f"Subject{num}"),
-        os.path.join(folder, f"S{num:02d}"),
-        folder,
-    ]
+        # Carga
+        candidates = [
+            os.path.join(folder, f"Base1_Sujeto{num}", "Biopac data"),
+            os.path.join(folder, f"Base1_Sujeto{num}"),
+            os.path.join(folder, f"Subject{num}"),
+            os.path.join(folder, f"S{num:02d}"),
+            folder,
+        ]
 
-    loaded = {}
-    for candidate in candidates:
-        try:
-            loaded = load_subject_folder(
-                candidate, device, self._cfg["signals"],
-                fs_map=fs_map,
-                apply_filters=self._filter_var.get(),
-            )
-            if loaded:
-                break
-        except FileNotFoundError:
-            continue
+        loaded = {}
+        for candidate in candidates:
+            try:
+                loaded = load_subject_folder(
+                    candidate, device, self._cfg["signals"],
+                    fs_map=fs_map,
+                    apply_filters=self._filter_var.get(),
+                )
+                if loaded:
+                    break
+            except FileNotFoundError:
+                continue
 
-    # ── Restaurar stdout ──────────────────────────────────────────────
-    sys.stdout = old_stdout
+        # Restaurar stdout
+        sys.stdout = old_stdout
 
-    if not loaded:
-        popup.destroy()
-        messagebox.showerror("Load error",
-                             f"Could not find signal files for Subject {num}.\n"
-                             f"Checked inside: {folder}")
-        return
+        if not loaded:
+            popup.destroy()
+            messagebox.showerror("Load error",
+                                 f"Could not find signal files for Subject {num}.\n"
+                                 f"Checked inside: {folder}")
+            return
 
-    _log(f"\n✓ Done — {len(loaded)} signal(s) loaded.")
-    ctk.CTkButton(popup, text="Continue →",
-                  command=popup.destroy).pack(pady=(0, 12))
+        _log(f"\n✓ Done — {len(loaded)} signal(s) loaded.")
+        ctk.CTkButton(popup, text="Continue →",
+                      command=popup.destroy).pack(pady=(0, 12))
 
-    self._signals         = loaded
-    self._current_subject = num
-    self._stress_map      = {}
-    self._set_status(f"Subject {num} loaded\n"
-                     f"{len(loaded)} signal(s): {', '.join(loaded.keys())}")
+        self._signals         = loaded
+        self._current_subject = num
+        self._stress_map      = {}
+        self._set_status(f"Subject {num} loaded\n"
+                         f"{len(loaded)} signal(s): {', '.join(loaded.keys())}")
 
-    popup.wait_window()   # espera a que el usuario cierre el popup
-    self._update_viewer()
+        popup.wait_window()
+        self._update_viewer()
+
     # ── Viewer ────────────────────────────────────────────────────────────────
 
     def _update_viewer(self):
