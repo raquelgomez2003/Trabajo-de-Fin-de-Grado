@@ -32,10 +32,9 @@ DEVICE_SIGNALS = { #searched signal for each case
 
 # Colours used for stress phases in plots
 PHASE_COLORS = {
-    "baseline": ("#6ab6fe", "Baseline"),
     "calming":  ("#2cec69", "Calming music"),
     "relax":    ("#AE1285", "Relax"),
-    "vexing":   ("#fa4343", "Vexing / Stress"),
+    "vexing":   ("#e3f632", "Vexing / Stress"),
 }
 
 # ECG 12-lead column names (Biopac export)

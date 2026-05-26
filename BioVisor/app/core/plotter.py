@@ -18,7 +18,6 @@ from sklearn.metrics import roc_curve, auc
 
 from app.core.config import PHASE_COLORS
 
-# Solo las 4 features fáciles de explicar
 FEATURE_NAMES = ["Mean", "Std", "RMS", "PtP"]
 FEATURE_DIM   = 4
 
@@ -64,6 +63,16 @@ def _draw_bpm_panel(ax: plt.Axes, t_bpm: np.ndarray,
         ax.axvspan(t_bpm[-1], t_bpm[-1] + (t_bpm[-1] - t_bpm[-2]),
                    color="#ffcccc", alpha=0.45, zorder=0)
 
+    # Flecha roja en puntos donde el BPM sube bruscamente y está en zona de estrés
+    diffs = np.diff(bpm)
+    for ji in np.where(np.abs(diffs) > 3)[0]:
+        if bpm[ji] > thresh:
+            ax.annotate("",
+                        xy=(t_bpm[ji], bpm[ji]),
+                        xytext=(t_bpm[ji], bpm[ji] + 2),
+                        arrowprops=dict(arrowstyle="->", color="#cc0000", lw=1.2),
+                        annotation_clip=True)
+
     _shade_phases(ax, phase_intervals)
     ax.set_ylabel("BPM", fontsize=8)
     ax.set_title("Heart Rate (BPM) — red zone: above personal stress threshold",
@@ -91,7 +100,9 @@ def _draw_rr_panel(ax: plt.Axes, rr_times: np.ndarray,
         ax.scatter(rr_times[mask], rr_ms[mask],
                    color="#cc0000", s=10, zorder=5, label="Short RR (stress)")
 
-    for di in np.where(np.diff(rr_ms) < -30)[0]:
+    # Flechitas en caídas bruscas de RR (aceleración súbita)
+    drops = np.where(np.diff(rr_ms) < -30)[0]
+    for di in drops:
         ax.annotate("",
                     xy=(rr_times[di + 1], rr_ms[di + 1]),
                     xytext=(rr_times[di + 1], rr_ms[di + 1] + 25),
@@ -156,7 +167,7 @@ def plot_signals_with_stress(
         fs   = fs_map.get(label, 2000)
         data = sig.ravel()
 
-        # Downsample for display only (every 10 samples) — data is not modified
+        # Downsample para display (máximo 10.000 puntos)
         step = max(1, len(data) // 10_000)
         t    = np.arange(len(data))[::step] / fs
         ax.plot(t, data[::step], lw=0.55, color="#2255aa", rasterized=True)
@@ -172,15 +183,22 @@ def plot_signals_with_stress(
 
     axs[-1].set_xlabel("Time (s)", fontsize=9)
 
+    # Leyenda — sin Baseline, solo fases relevantes + marcador de estrés
     patches = [
         mpatches.Patch(color=col, alpha=0.5, label=lbl)
-        for col, lbl in PHASE_COLORS.values()
+        for key, (col, lbl) in PHASE_COLORS.items()
+        if key != "baseline"
     ]
     patches.append(plt.Line2D([0], [0], marker="v", color="w",
                                markerfacecolor="#cc0000", markersize=7,
                                label="Predicted stress ▼"))
+    patches.append(plt.Line2D([0], [0], color="#cc0000", lw=1.5,
+                               marker=">", markersize=6,
+                               markerfacecolor="#cc0000",
+                               label="BPM stress point →"))
     fig.legend(handles=patches, loc="lower center",
                ncol=len(patches), fontsize=8, bbox_to_anchor=(0.5, -0.005))
+
     fig.tight_layout(rect=[0, 0.03, 1, 0.998])
     plt.subplots_adjust(hspace=0.5)
     return fig
@@ -209,6 +227,12 @@ def plot_boxplots(phase_features: dict[str, np.ndarray], signal_name: str) -> Fi
         for patch, col in zip(bp["boxes"], colors[:len(phase_labels)]):
             patch.set_facecolor(col)
             patch.set_alpha(0.7)
+
+        # Limitar eje Y al percentil 2-98 para ignorar outliers extremos
+        all_vals = np.concatenate([d for d in data_per_phase if len(d) > 0])
+        if len(all_vals) > 0:
+            ax.set_ylim(np.percentile(all_vals, 2), np.percentile(all_vals, 98))
+
         ax.set_xticks(range(1, len(phase_labels) + 1))
         ax.set_xticklabels(phase_labels, fontsize=7, rotation=15)
         ax.set_title(feat_name, fontsize=9)

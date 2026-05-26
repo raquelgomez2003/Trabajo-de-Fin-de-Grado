@@ -23,17 +23,15 @@ class AppWindow(ctk.CTk):
 
     def __init__(self):
         super().__init__()
-        import sys
-        from PIL import Image
-
         self.title("BioVisor — Biomedical Signal Viewer & Analyser")
-        if sys.platform == "win32":
-            self.iconbitmap("assets/logo.ico")
-        else:
-            img = Image.open("assets/logo.png")
-            self.iconphoto(True, ctk.CTkImage(img))
         self.geometry("1400x820")
         self.minsize(1100, 650)
+
+        # Logo
+        BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        ico = os.path.join(BASE_DIR, "assets", "logo.ico")
+        if os.path.exists(ico):
+            self.iconbitmap(ico)
 
         self._cfg:             dict        = {}
         self._signals:         dict        = {}
@@ -50,7 +48,6 @@ class AppWindow(ctk.CTk):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # Left panel
         self._left = ctk.CTkFrame(self, width=230)
         self._left.grid(row=0, column=0, sticky="ns", padx=(10, 4), pady=10)
         self._left.grid_propagate(False)
@@ -72,7 +69,6 @@ class AppWindow(ctk.CTk):
             self._left, label_text="Subjects", height=180)
         self._frame_subjects.pack(fill="x", padx=10, pady=(10, 6))
 
-        # Phase interval rows
         ctk.CTkLabel(self._left, text="Phase Intervals (seconds)",
                      font=("Arial", 11, "bold")).pack(pady=(10, 2))
 
@@ -96,20 +92,18 @@ class AppWindow(ctk.CTk):
                                         font=("Arial", 10))
         self._lbl_status.pack(padx=10, pady=4)
 
-        # Right tabs
         self._tabs = ctk.CTkTabview(self)
         self._tabs.grid(row=0, column=1, sticky="nsew", padx=(4, 10), pady=10)
         self._tabs.add("Signal Viewer")
         self._tabs.add("Analysis")
 
-        self._viewer   = ViewerWindow(self._tabs.tab("Signal Viewer"))
+        self._viewer = ViewerWindow(self._tabs.tab("Signal Viewer"))
         self._viewer.pack(fill="both", expand=True)
 
         self._analysis = AnalysisWindow(self._tabs.tab("Analysis"))
         self._analysis.pack(fill="both", expand=True)
 
     def _phase_row(self, label: str, color: str) -> tuple:
-        """Build a start/end entry row for a phase interval."""
         f = ctk.CTkFrame(self._left, fg_color="transparent")
         f.pack(fill="x", padx=10, pady=2)
         ctk.CTkLabel(f, text=label, width=70, text_color=color).pack(side="left")
@@ -152,9 +146,9 @@ class AppWindow(ctk.CTk):
             messagebox.showinfo("No session", "Please configure a session first.")
             return
 
-        folder  = self._cfg["folder"]
-        device  = self._cfg["device"]
-        fs_map  = self._cfg.get("fs", {})
+        folder = self._cfg["folder"]
+        device = self._cfg["device"]
+        fs_map = self._cfg.get("fs", {})
 
         candidates = [
             os.path.join(folder, f"Base1_Sujeto{num}", "Biopac data"),
@@ -195,12 +189,23 @@ class AppWindow(ctk.CTk):
     def _update_viewer(self):
         if not self._signals:
             return
-        phase_intervals = self._read_phase_intervals()
+
+        phase_intervals   = self._read_phase_intervals()
         bpm_data, rr_data = None, None
+
         if "ECG" in self._signals:
-            ecg_fs   = self._cfg.get("fs", {}).get("ECG", 2000)
-            bpm_data = compute_bpm(self._signals["ECG"], ecg_fs)
-            rr_data  = compute_rr(self._signals["ECG"],  ecg_fs)
+            ecg_fs = self._cfg.get("fs", {}).get("ECG", 2000)
+            print(f"[DEBUG] ECG encontrado, fs={ecg_fs}, muestras={len(self._signals['ECG'])}")
+            try:
+                bpm_data = compute_bpm(self._signals["ECG"], ecg_fs)
+                rr_data  = compute_rr(self._signals["ECG"],  ecg_fs)
+                print(f"[DEBUG] BPM calculado: {len(bpm_data[0])} puntos")
+                print(f"[DEBUG] RR calculado:  {len(rr_data[0])} puntos")
+            except Exception as e:
+                print(f"[DEBUG] Error calculando BPM/RR: {e}")
+        else:
+            print(f"[DEBUG] Señales cargadas: {list(self._signals.keys())} — ECG no encontrado")
+
         self._viewer.render(
             self._signals, self._cfg.get("fs", {}),
             phase_intervals, self._stress_map, bpm_data, rr_data,
