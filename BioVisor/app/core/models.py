@@ -44,12 +44,15 @@ def _bandpass(signal: np.ndarray, fs: float,
 def _detect_peaks(ecg_1d: np.ndarray, fs: float,
                   min_rr_sec: float = 0.3) -> np.ndarray:
     filtered = _bandpass(ecg_1d, fs, 0.5, 40.0)
+    std = np.std(filtered)
+    if std < 1e-10:
+        return np.array([], dtype=int)
+    # Altura relativa más permisiva para señales en µV
+    height = 0.1 * std   # ← era 0.3, bajamos a 0.1
     peaks, _ = find_peaks(filtered,
                           distance=int(min_rr_sec * fs),
-                          height=0.3 * np.std(filtered))
+                          height=height)
     return peaks
-
-
 # ── RR intervals ──────────────────────────────────────────────────────────────
 
 def compute_rr(ecg_signal: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray]:
@@ -236,6 +239,41 @@ def extract_features_windowed(
         return np.empty((0, FEATURE_DIM)), np.array([])
     return np.array(features, dtype=float), np.array(centers)
 
+
+def extract_features_all_signals(
+    signals: dict[str, np.ndarray],
+    fs_map:  dict[str, float],
+    window_sec: float = 30.0,
+    step_sec:   float = 15.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Extrae features de todas las señales y las concatena en una sola matriz.
+    Cada fila = una ventana de tiempo, columnas = features de todas las señales.
+    Returns (X, t_centers).
+    """
+    all_X:  list[np.ndarray] = []
+    common_t: np.ndarray | None = None
+    n_win = None
+
+    for sig_name, signal in signals.items():
+        fs = fs_map.get(sig_name, 2000)
+        X, t = extract_features_windowed(signal, fs, sig_name, window_sec, step_sec)
+        if len(X) == 0:
+            continue
+        if common_t is None:
+            common_t = t
+            n_win    = len(t)
+        else:
+            n_win = min(n_win, len(t))
+        all_X.append(X[:n_win])
+
+    if not all_X or common_t is None:
+        return np.empty((0, 0)), np.array([])
+
+    # Recortar todas al mismo número de ventanas y concatenar columnas
+    n_win    = min(len(X) for X in all_X)
+    X_concat = np.concatenate([X[:n_win] for X in all_X], axis=1)
+    return X_concat, common_t[:n_win]
 
 # ── Physiological stress labels ───────────────────────────────────────────────
 
