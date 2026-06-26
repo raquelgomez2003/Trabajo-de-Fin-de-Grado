@@ -17,6 +17,8 @@ import os
 import csv
 from datetime import datetime
 from tkinter import messagebox, filedialog
+import scipy.signal
+from scipy.signal import hilbert, savgol_filter
 
 from app.core.models import (
     StressModel,
@@ -392,59 +394,148 @@ def _plot_global_stress_probability(stress_map, stress_intervals,
 
 def _plot_global_heatmap_mean(stress_map, stress_intervals,
                                calming_intervals, model_name=""):
+    from scipy.signal import hilbert
+
     sig_names = list(stress_map.keys())
+
     if not sig_names:
         fig = plt.figure(figsize=(_FIG_W, _FIG_H))
-        ax  = fig.add_axes([_LEFT, 0.18, _RIGHT - _LEFT, 0.72])
+        ax = fig.add_axes([_LEFT, 0.18, _RIGHT - _LEFT, 0.72])
         ax.text(0.5, 0.5, "No results.", ha="center", va="center")
         return fig
+
+    # Tiempo de referencia (la señal con más ventanas)
     t_ref = max((stress_map[s][0] for s in sig_names), key=len)
-    t_min, t_max = t_ref[0], t_ref[-1]
-    rows = [np.interp(t_ref, stress_map[s][0], stress_map[s][2],
-                      left=np.nan, right=np.nan)
-            for s in sig_names if len(stress_map[s][0]) > 1]
-    mean_row = np.nanmean(np.array(rows), axis=0)
-    fig      = plt.figure(figsize=(_FIG_W, _FIG_H))
-    ax_heat  = fig.add_axes([_LEFT, 0.32, _RIGHT - _LEFT, 0.52])
+
+    t_min = t_ref[0]
+    t_max = t_ref[-1]
+
+    # Interpolar probabilidades de todas las señales
+    rows = []
+    for s in sig_names:
+        t, _, scores = stress_map[s]
+
+        if len(t) < 2:
+            continue
+
+        interp_scores = np.interp(
+            t_ref,
+            t,
+            scores,
+            left=np.nan,
+            right=np.nan,
+        )
+
+        rows.append(interp_scores)
+
+    rows = np.array(rows)
+
+    # Media entre señales
+    mean_prob = np.nanmean(rows, axis=0)
+
+    # Sustituir NaN por la media
+    mean_prob = np.nan_to_num(mean_prob, nan=np.nanmean(mean_prob))
+
+    # ===============================
+    # ENVOLVENTE (Hilbert + suavizado)
+    # ===============================
+    analytic_signal = scipy.signal.hilbert(mean_prob)
+    envelope = np.abs(analytic_signal)
+
+    # Suavizado de la envolvente
+    window = min(21, len(envelope))
+    if window % 2 == 0:
+        window -= 1
+    if window >= 5:
+        envelope = scipy.signal.savgol_filter(envelope, window_length=window, polyorder=3)
+
+    # ===============================
+    # NORMALIZACIÓN [0,1]
+    # ===============================
+    envelope = (
+        envelope - np.min(envelope)
+    ) / (np.max(envelope) - np.min(envelope) + 1e-12)    # ===============================
+    # FIGURA
+    # ===============================
+    fig = plt.figure(figsize=(_FIG_W, _FIG_H))
+
+    ax_heat = fig.add_axes([_LEFT, 0.32, _RIGHT - _LEFT, 0.52])
     ax_phase = fig.add_axes([_LEFT, 0.10, _RIGHT - _LEFT, 0.18])
-    ax_cbar  = fig.add_axes([_CBAR_LEFT, 0.32, _CBAR_W, 0.52])
-    im = ax_heat.imshow(mean_row[np.newaxis, :], aspect="auto",
-                         cmap=STRESS_CMAP, vmin=0.0, vmax=1.0,
-                         extent=[t_min, t_max, 0.5, -0.5],
-                         interpolation="bilinear")
+    ax_cbar = fig.add_axes([_CBAR_LEFT, 0.32, _CBAR_W, 0.52])
+
+    im = ax_heat.imshow(
+        envelope[np.newaxis, :],
+        aspect="auto",
+        cmap=STRESS_CMAP,
+        vmin=0,
+        vmax=1,
+        extent=[t_min, t_max, 0.5, -0.5],
+        interpolation="bilinear",
+    )
+
     ax_heat.set_yticks([0])
-    ax_heat.set_yticklabels(["Mean"], fontsize=9)
+    ax_heat.set_yticklabels(["Envelope"], fontsize=9)
     ax_heat.set_xticks([])
-    title = "Mean stress probability heatmap"
-    if model_name: title += f"  [{model_name}]"
+
+    title = "Stress probability envelope heatmap"
+
+    if model_name:
+        title += f"  [{model_name}]"
+
     ax_heat.set_title(title, fontsize=11, fontweight="bold", pad=5)
+
+    # Líneas de las fases
     for s, e in calming_intervals:
         ax_heat.axvline(s, color="#00aa44", lw=1.0, ls="--", alpha=0.7)
         ax_heat.axvline(e, color="#00aa44", lw=1.0, ls="--", alpha=0.7)
+
     for s, e in stress_intervals:
         ax_heat.axvline(s, color="#cc0000", lw=1.0, ls="--", alpha=0.7)
         ax_heat.axvline(e, color="#cc0000", lw=1.0, ls="--", alpha=0.7)
+
     cbar = fig.colorbar(im, cax=ax_cbar)
-    cbar.set_label("P(stress)", fontsize=8)
-    cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
+    cbar.set_label("Normalized envelope", fontsize=8)
+    cbar.set_ticks([0, 0.25, 0.5, 0.75, 1])
     cbar.ax.tick_params(labelsize=7)
+
+    # Barra inferior de fases
     ax_phase.set_xlim(t_min, t_max)
     ax_phase.set_ylim(0, 1)
     ax_phase.set_yticks([])
     ax_phase.set_xlabel("Time (s)", fontsize=9)
+
     ax_phase.axhspan(0, 1, color="#dddddd", alpha=0.4)
+
     for s, e in calming_intervals:
         ax_phase.axvspan(s, e, color="#b6f0c8", alpha=0.9)
-        ax_phase.text((s+e)/2, 0.5, "Calming", ha="center", va="center",
-                      fontsize=7, color="#1a6b3a", fontweight="bold")
+        ax_phase.text(
+            (s + e) / 2,
+            0.5,
+            "Calming",
+            ha="center",
+            va="center",
+            fontsize=7,
+            color="#1a6b3a",
+            fontweight="bold",
+        )
+
     for s, e in stress_intervals:
         ax_phase.axvspan(s, e, color="#ffb3b3", alpha=0.9)
-        ax_phase.text((s+e)/2, 0.5, "Stress", ha="center", va="center",
-                      fontsize=7, color="#aa2222", fontweight="bold")
+        ax_phase.text(
+            (s + e) / 2,
+            0.5,
+            "Stress",
+            ha="center",
+            va="center",
+            fontsize=7,
+            color="#aa2222",
+            fontweight="bold",
+        )
+
     for spine in ["top", "right", "left"]:
         ax_phase.spines[spine].set_visible(False)
-    return fig
 
+    return fig
 
 # ── Per-signal plot functions ─────────────────────────────────────────────────
 
