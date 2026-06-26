@@ -11,7 +11,6 @@ from tkinter import messagebox
 import matplotlib.pyplot as plt
 
 from app.core.data_loader import load_subject_folder
-from app.core.models import compute_bpm, compute_rr
 from app.gui.setup_window import SetupWindow
 from app.gui.viewer_window import ViewerWindow
 from app.gui.analysis_window import AnalysisWindow
@@ -33,10 +32,10 @@ class AppWindow(ctk.CTk):
         if os.path.exists(ico):
             self.iconbitmap(ico)
 
-        self._cfg:             dict        = {}
-        self._signals:         dict        = {}
-        self._stress_map:      dict        = {}
-        self._current_subject: int | None  = None
+        self._cfg:             dict       = {}
+        self._signals:         dict       = {}
+        self._stress_map:      dict       = {}
+        self._current_subject: int | None = None
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -83,9 +82,13 @@ class AppWindow(ctk.CTk):
         ctk.CTkButton(self._left, text="▶  Run Analysis",
                       fg_color="#336699", hover_color="#224477",
                       command=self._run_analysis).pack(fill="x", padx=14, pady=4)
-        ctk.CTkButton(self._left, text="Reset View",
+
+        # Reset App — clears current subject and analysis, keeps session config
+        ctk.CTkButton(self._left, text="↺  Reset App",
                       fg_color="transparent", border_width=1,
-                      command=self._reset_view).pack(fill="x", padx=14, pady=(4, 14))
+                      text_color="#aa2222", border_color="#aa2222",
+                      hover_color="#ffeeee",
+                      command=self._reset_app).pack(fill="x", padx=14, pady=(4, 14))
 
         self._lbl_status = ctk.CTkLabel(self._left, text="No session loaded.",
                                         text_color="gray", wraplength=200,
@@ -150,7 +153,6 @@ class AppWindow(ctk.CTk):
         device = self._cfg["device"]
         fs_map = self._cfg.get("fs", {})
 
-        # Popup de progreso
         popup = ctk.CTkToplevel(self)
         popup.title(f"Loading Subject {num}")
         popup.geometry("420x300")
@@ -160,7 +162,8 @@ class AppWindow(ctk.CTk):
         ctk.CTkLabel(popup, text=f"Loading Subject {num}…",
                      font=("Arial", 13, "bold")).pack(pady=(16, 6))
 
-        log_box = ctk.CTkTextbox(popup, width=380, height=200, font=("Courier", 10))
+        log_box = ctk.CTkTextbox(popup, width=380, height=200,
+                                  font=("Courier", 10))
         log_box.pack(padx=16, pady=(0, 16))
         log_box.configure(state="disabled")
 
@@ -171,7 +174,6 @@ class AppWindow(ctk.CTk):
             log_box.configure(state="disabled")
             popup.update()
 
-        # Redirigir prints al popup
         class _LogRedirect:
             def write(self, msg):
                 if msg.strip():
@@ -182,7 +184,6 @@ class AppWindow(ctk.CTk):
         old_stdout = sys.stdout
         sys.stdout = _LogRedirect()
 
-        # Carga
         candidates = [
             os.path.join(folder, f"Base1_Sujeto{num}", "Biopac data"),
             os.path.join(folder, f"Base1_Sujeto{num}"),
@@ -204,7 +205,6 @@ class AppWindow(ctk.CTk):
             except FileNotFoundError:
                 continue
 
-        # Restaurar stdout
         sys.stdout = old_stdout
 
         if not loaded:
@@ -233,30 +233,17 @@ class AppWindow(ctk.CTk):
         if not self._signals:
             return
 
-        phase_intervals   = self._read_phase_intervals()
-        bpm_data, rr_data = None, None
-
-        if "ECG" in self._signals:
-            ecg_fs = self._cfg.get("fs", {}).get("ECG", 2000)
-            print(f"[DEBUG] ECG encontrado, fs={ecg_fs}, muestras={len(self._signals['ECG'])}")
-            try:
-                bpm_data = compute_bpm(self._signals["ECG"], ecg_fs)
-                rr_data  = compute_rr(self._signals["ECG"],  ecg_fs)
-                print(f"[DEBUG] BPM calculado: {len(bpm_data[0])} puntos")
-                print(f"[DEBUG] RR calculado:  {len(rr_data[0])} puntos")
-            except Exception as e:
-                print(f"[DEBUG] Error calculando BPM/RR: {e}")
-        else:
-            print(f"[DEBUG] Señales cargadas: {list(self._signals.keys())} — ECG no encontrado")
+        phase_intervals = self._read_phase_intervals()
 
         self._viewer.render(
-            self._signals, self._cfg.get("fs", {}),
-            phase_intervals, self._stress_map, bpm_data, rr_data,
+            self._signals,
+            self._cfg.get("fs", {}),
+            phase_intervals,
+            self._stress_map,
+            bpm_data=None,
+            rr_data=None,
         )
         self._tabs.set("Signal Viewer")
-
-    def _reset_view(self):
-        self._viewer.reset_view()
 
     # ── Analysis ──────────────────────────────────────────────────────────────
 
@@ -274,6 +261,44 @@ class AppWindow(ctk.CTk):
         self._tabs.set("Analysis")
         self._set_status("Data loaded into Analysis tab.\n"
                          "Select plots and press ▶ Run analysis.")
+
+    # ── Reset App ─────────────────────────────────────────────────────────────
+
+    def _reset_app(self):
+        """
+        Clear current subject data and analysis results.
+        Keeps session config and subject buttons so the user can
+        immediately pick another subject.
+        """
+        self._signals         = {}
+        self._stress_map      = {}
+        self._current_subject = None
+
+        # Clear viewer and show placeholder
+        self._viewer._clear()
+        ctk.CTkLabel(
+            self._viewer._frame_plot,
+            text="Load a subject to display signals.",
+            text_color="gray", font=("Arial", 13),
+        ).grid(row=0, column=0)
+
+        # Clear analysis results AND signal data inside analysis panel
+        self._analysis.reset_for_new_subject()
+
+        # Clear phase interval entries
+        for entry in (self._e_calm_s, self._e_calm_e,
+                      self._e_stress_s, self._e_stress_e):
+            entry.delete(0, "end")
+
+        self._tabs.set("Signal Viewer")
+
+        if self._cfg:
+            self._set_status(
+                f"App reset.\nSession: {self._cfg.get('device', '')}\n"
+                f"Select a subject to continue."
+            )
+        else:
+            self._set_status("App reset.\nNo session loaded.")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
