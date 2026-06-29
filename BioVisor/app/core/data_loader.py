@@ -33,6 +33,19 @@ def _load_biopac_csv(path: str) -> np.ndarray | None:
     return None
 
 
+def _resample_to_target(signal: np.ndarray, fs_orig: float,
+                         fs_target: float = 2000.0) -> np.ndarray:
+    """Resample signal from fs_orig to fs_target using linear interpolation."""
+    if abs(fs_orig - fs_target) < 0.01:
+        return signal
+    duration   = len(signal) / fs_orig
+    n_orig     = len(signal)
+    n_target   = int(round(duration * fs_target))
+    t_orig     = np.linspace(0, duration, n_orig,   endpoint=False)
+    t_target   = np.linspace(0, duration, n_target, endpoint=False)
+    return np.interp(t_target, t_orig, signal).astype(np.float32)
+
+
 def _load_empatica_csv(
     path: str,
     sig_type: str,
@@ -83,6 +96,8 @@ def _load_empatica_csv(
             signal = arr
 
         fs_map[sig_type] = fs
+        signal = _resample_to_target(signal, fs_orig=fs, fs_target=2000.0)
+        fs_map[sig_type] = 2000.0   # after resampling all signals are at 2000 Hz
         return signal.astype(float)
 
     except Exception as e:

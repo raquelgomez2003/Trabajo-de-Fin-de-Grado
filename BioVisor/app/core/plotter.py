@@ -259,7 +259,7 @@ def plot_signals_with_stress(
     has_bpm   = bpm_data is not None and len(bpm_data[0]) > 0
     has_rr    = rr_data  is not None and len(rr_data[0])  > 0
 
-    panels = [(name, 2.2 if name == "ECG" else 1.0) for name in sig_names]
+    panels = [(name, 2.2 if name in ("ECG", "BVP") else 1.0) for name in sig_names]
     if has_bpm:
         panels.append(("__BPM__", 1.4))
     if has_rr:

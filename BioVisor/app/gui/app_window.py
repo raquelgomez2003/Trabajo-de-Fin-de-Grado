@@ -183,18 +183,24 @@ class AppWindow(ctk.CTk):
         old_stdout = sys.stdout
         sys.stdout = _LogRedirect()
 
-        # ── Candidate folders — Biopac and Empatica structures ────────────────
-        candidates = [
-            # Empatica — exact folder name found in dataset
-            os.path.join(folder, f"Base1_Sujeto{num}", "Empatica_data"),
-            # Biopac
-            os.path.join(folder, f"Base1_Sujeto{num}", "Biopac data"),
-            os.path.join(folder, f"Base1_Sujeto{num}"),
-            # Other common structures
-            os.path.join(folder, f"Subject{num}"),
-            os.path.join(folder, f"S{num:02d}"),
-            folder,
-        ]
+        # Candidate folders depend on device type
+        if device == "Biopac":
+            candidates = [
+                os.path.join(folder, f"Base1_Sujeto{num}", "Biopac data"),
+                os.path.join(folder, f"Base1_Sujeto{num}"),
+                os.path.join(folder, f"Subject{num}"),
+                os.path.join(folder, f"S{num:02d}"),
+                folder,
+            ]
+        else:  # Empatica
+            candidates = [
+                os.path.join(folder, f"Base1_Sujeto{num}", "Empatica_data"),
+                os.path.join(folder, f"Base1_Sujeto{num}", "Empatica data"),
+                os.path.join(folder, f"Base1_Sujeto{num}", "Empatica"),
+                os.path.join(folder, f"Subject{num}"),
+                os.path.join(folder, f"S{num:02d}"),
+                folder,
+            ]
 
         loaded = {}
         for candidate in candidates:
