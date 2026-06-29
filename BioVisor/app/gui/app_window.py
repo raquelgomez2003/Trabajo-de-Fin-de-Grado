@@ -240,7 +240,73 @@ class AppWindow(ctk.CTk):
                          f"{len(loaded)} signal(s): {', '.join(loaded.keys())}")
 
         popup.wait_window()
+
+        # ── Auto-load session times if CSV exists ─────────────────────────────
+        self._try_load_session_times(num)
+
         self._update_viewer()
+
+    def _try_load_session_times(self, num: int) -> None:
+        """
+        Look for SubjectXX_Session_Times.csv inside Base1_SujetoN
+        and auto-fill the calming/stress phase entry fields.
+
+        CSV format (semicolon-separated):
+            calming_start;calming_end;vexing_start;vexing_end
+            502;1469;1613;2579
+        Values are in seconds.
+        """
+        folder = self._cfg.get("folder", "")
+        # Search in the subject's root folder (parent of Biopac/Empatica)
+        subject_dir = os.path.join(folder, f"Base1_Sujeto{num}")
+        if not os.path.isdir(subject_dir):
+            return
+
+        # Find any CSV that contains "Session_Times" in its name
+        csv_path = None
+        try:
+            for entry in os.scandir(subject_dir):
+                if entry.is_file() and "session_times" in entry.name.lower():
+                    csv_path = entry.path
+                    break
+        except Exception:
+            return
+
+        if csv_path is None:
+            return
+
+        try:
+            import csv
+            with open(csv_path, newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f, delimiter=";")
+                for row in reader:
+                    # Skip empty rows
+                    cs = row.get("calming_start", "").strip()
+                    ce = row.get("calming_end",   "").strip()
+                    vs = row.get("vexing_start",  "").strip()
+                    ve = row.get("vexing_end",    "").strip()
+                    # Remove thousand-separator dots (e.g. 1.469 → 1469)
+                    cs = cs.replace(".", "")
+                    ce = ce.replace(".", "")
+                    vs = vs.replace(".", "")
+                    ve = ve.replace(".", "")
+                    if not cs:
+                        continue
+
+                    # Fill calming entries
+                    for entry, val in [
+                        (self._e_calm_s,   cs),
+                        (self._e_calm_e,   ce),
+                        (self._e_stress_s, vs),
+                        (self._e_stress_e, ve),
+                    ]:
+                        entry.delete(0, "end")
+                        entry.insert(0, val)
+                    break  # only first data row
+
+            print(f"[OK] Session times loaded from {os.path.basename(csv_path)}")
+        except Exception as e:
+            print(f"[WARN] Could not read session times: {e}")
 
     # ── Viewer ────────────────────────────────────────────────────────────────
 
