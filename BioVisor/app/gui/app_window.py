@@ -83,7 +83,6 @@ class AppWindow(ctk.CTk):
                       fg_color="#336699", hover_color="#224477",
                       command=self._run_analysis).pack(fill="x", padx=14, pady=4)
 
-        # Reset App — clears current subject and analysis, keeps session config
         ctk.CTkButton(self._left, text="↺  Reset App",
                       fg_color="transparent", border_width=1,
                       text_color="#aa2222", border_color="#aa2222",
@@ -151,19 +150,19 @@ class AppWindow(ctk.CTk):
 
         folder = self._cfg["folder"]
         device = self._cfg["device"]
-        fs_map = self._cfg.get("fs", {})
+        # Start with a fresh copy of the config fs so loader can update it
+        fs_map = dict(self._cfg.get("fs", {}))
 
         popup = ctk.CTkToplevel(self)
         popup.title(f"Loading Subject {num}")
-        popup.geometry("420x300")
+        popup.geometry("500x320")
         popup.resizable(False, False)
         popup.grab_set()
 
         ctk.CTkLabel(popup, text=f"Loading Subject {num}…",
                      font=("Arial", 13, "bold")).pack(pady=(16, 6))
 
-        log_box = ctk.CTkTextbox(popup, width=380, height=200,
-                                  font=("Courier", 10))
+        log_box = ctk.CTkTextbox(popup, width=460, height=210, font=("Courier", 10))
         log_box.pack(padx=16, pady=(0, 16))
         log_box.configure(state="disabled")
 
@@ -184,9 +183,14 @@ class AppWindow(ctk.CTk):
         old_stdout = sys.stdout
         sys.stdout = _LogRedirect()
 
+        # ── Candidate folders — Biopac and Empatica structures ────────────────
         candidates = [
+            # Empatica — exact folder name found in dataset
+            os.path.join(folder, f"Base1_Sujeto{num}", "Empatica_data"),
+            # Biopac
             os.path.join(folder, f"Base1_Sujeto{num}", "Biopac data"),
             os.path.join(folder, f"Base1_Sujeto{num}"),
+            # Other common structures
             os.path.join(folder, f"Subject{num}"),
             os.path.join(folder, f"S{num:02d}"),
             folder,
@@ -194,6 +198,8 @@ class AppWindow(ctk.CTk):
 
         loaded = {}
         for candidate in candidates:
+            if not os.path.isdir(candidate):
+                continue
             try:
                 loaded = load_subject_folder(
                     candidate, device, self._cfg["signals"],
@@ -201,8 +207,11 @@ class AppWindow(ctk.CTk):
                     apply_filters=self._filter_var.get(),
                 )
                 if loaded:
+                    # Propagate fs values read from Empatica files back to cfg
+                    self._cfg["fs"] = fs_map
                     break
-            except FileNotFoundError:
+            except Exception as e:
+                print(f"[SKIP] {candidate}: {e}")
                 continue
 
         sys.stdout = old_stdout
@@ -232,9 +241,7 @@ class AppWindow(ctk.CTk):
     def _update_viewer(self):
         if not self._signals:
             return
-
         phase_intervals = self._read_phase_intervals()
-
         self._viewer.render(
             self._signals,
             self._cfg.get("fs", {}),
@@ -265,16 +272,10 @@ class AppWindow(ctk.CTk):
     # ── Reset App ─────────────────────────────────────────────────────────────
 
     def _reset_app(self):
-        """
-        Clear current subject data and analysis results.
-        Keeps session config and subject buttons so the user can
-        immediately pick another subject.
-        """
         self._signals         = {}
         self._stress_map      = {}
         self._current_subject = None
 
-        # Clear viewer and show placeholder
         self._viewer._clear()
         ctk.CTkLabel(
             self._viewer._frame_plot,
@@ -282,10 +283,8 @@ class AppWindow(ctk.CTk):
             text_color="gray", font=("Arial", 13),
         ).grid(row=0, column=0)
 
-        # Clear analysis results AND signal data inside analysis panel
         self._analysis.reset_for_new_subject()
 
-        # Clear phase interval entries
         for entry in (self._e_calm_s, self._e_calm_e,
                       self._e_stress_s, self._e_stress_e):
             entry.delete(0, "end")
