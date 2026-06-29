@@ -17,8 +17,6 @@ import os
 import csv
 from datetime import datetime
 from tkinter import messagebox, filedialog
-import scipy.signal
-from scipy.signal import hilbert, savgol_filter
 
 from app.core.models import (
     StressModel,
@@ -30,7 +28,7 @@ from app.core.models import (
     FEATURE_DIM,
 )
 from app.core.config import RF_WINDOW_SEC, RF_STEP_SEC
-from app.core.plotter import plot_boxplots, plot_roc
+from app.core.plotter import plot_roc   # ← solo plot_roc, sin plot_boxplots
 
 
 # ── Stress colormap ───────────────────────────────────────────────────────────
@@ -88,7 +86,6 @@ def _build_classifier(name: str):
         return CLASSIFIERS[name](n_estimators=100, random_state=42,
                                   verbose=-1, n_jobs=-1)
     if name == "SVM":
-        # probability=True is required for predict_proba
         return CLASSIFIERS[name](kernel="rbf", probability=True,
                                   random_state=42, C=1.0, gamma="scale")
     if name == "KNN":
@@ -105,12 +102,10 @@ def _fit_predict(clf, X_train, y_train, X_all):
     X_train = np.asarray(X_train, dtype=float)
     X_all   = np.asarray(X_all,   dtype=float)
 
-    # Impute NaN with column median
     imp = SimpleImputer(strategy="median")
     X_train = imp.fit_transform(X_train)
     X_all   = imp.transform(X_all)
 
-    # Scale features — especially important for SVM and KNN
     scaler  = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_all   = scaler.transform(X_all)
@@ -122,7 +117,6 @@ def _fit_predict(clf, X_train, y_train, X_all):
         if hasattr(clf, "predict_proba"):
             scores = clf.predict_proba(X_all)[:, 1]
         else:
-            # SVM without probability — use decision_function and normalise
             df = clf.decision_function(X_all)
             scores = (df - df.min()) / (df.max() - df.min() + 1e-9)
     return preds, scores
@@ -130,47 +124,34 @@ def _fit_predict(clf, X_train, y_train, X_all):
 
 # ── CSV export ────────────────────────────────────────────────────────────────
 
-def _export_stress_csv(
-    all_stress_maps: dict[str, dict[str, tuple]],
-    parent_widget,
-) -> None:
-    """
-    Export one row per classifier with the global mean stress probability
-    (mean across all signals and all time windows).
-    """
+def _export_stress_csv(all_stress_maps, parent_widget):
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"Stress_Probability_{ts}.csv"
     path     = filedialog.asksaveasfilename(
-        initialfile=filename,
-        defaultextension=".csv",
+        initialfile=filename, defaultextension=".csv",
         filetypes=[("CSV files", "*.csv")],
         title="Save stress probability CSV",
     )
     if not path:
         return
-
     if not all_stress_maps:
         messagebox.showwarning("Export", "No data to export.")
         return
-
     try:
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["classifier", "global_mean_stress_score",
                              "global_mean_stress_pred"])
             for clf_name, clf_data in all_stress_maps.items():
-                all_scores = []
-                all_preds  = []
+                all_scores, all_preds = [], []
                 for t_c, preds, scores in clf_data.values():
                     all_scores.extend(scores.tolist())
                     all_preds.extend(preds.tolist())
                 if not all_scores:
                     continue
-                mean_score = float(np.nanmean(all_scores))
-                mean_pred  = float(np.nanmean(all_preds))
                 writer.writerow([clf_name,
-                                 f"{mean_score:.6f}",
-                                 f"{mean_pred:.6f}"])
+                                 f"{float(np.nanmean(all_scores)):.6f}",
+                                 f"{float(np.nanmean(all_preds)):.6f}"])
         messagebox.showinfo("Export", f"Saved to:\n{path}")
     except Exception as ex:
         messagebox.showerror("Export error", str(ex))
@@ -193,10 +174,50 @@ def _split_by_phase(X, t_centers, calming_intervals, stress_intervals):
     return result
 
 
+# ── Boxplots (local, no circular import) ─────────────────────────────────────
+
+def _plot_boxplots_big(phase_features, signal_name):
+    phase_labels = list(phase_features.keys())
+    colors       = ["#5599dd", "#55bb77", "#8877dd", "#dd5555"]
+    feat_names   = ["Mean", "Std", "RMS", "PtP"]
+    feat_dim     = 4
+
+    fig, axs = plt.subplots(1, feat_dim, figsize=(4 * feat_dim, 4))
+    fig.suptitle(f"Feature Distribution — {signal_name}",
+                 fontsize=13, fontweight="bold")
+
+    for fi, feat_name in enumerate(feat_names):
+        ax = axs[fi]
+        data_per_phase = [
+            phase_features[ph][:, fi]
+            if phase_features[ph].ndim == 2 and phase_features[ph].shape[1] > fi
+            else np.array([])
+            for ph in phase_labels
+        ]
+        bp = ax.boxplot(data_per_phase, patch_artist=True,
+                        medianprops=dict(color="black", lw=1.5))
+        for patch, col in zip(bp["boxes"], colors[:len(phase_labels)]):
+            patch.set_facecolor(col)
+            patch.set_alpha(0.7)
+
+        all_vals = np.concatenate([d for d in data_per_phase if len(d) > 0])
+        if len(all_vals) > 0:
+            ax.set_ylim(np.percentile(all_vals, 2),
+                        np.percentile(all_vals, 98))
+
+        ax.set_xticks(range(1, len(phase_labels) + 1))
+        ax.set_xticklabels(phase_labels, fontsize=11, rotation=15)
+        ax.tick_params(axis="y", labelsize=10)
+        ax.set_title(feat_name, fontsize=11, fontweight="bold")
+        ax.grid(True, axis="y", alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
 # ── RR interval from ECG ─────────────────────────────────────────────────────
 
 def _compute_rr_from_ecg(ecg, fs):
-    """Detect R-peaks and return (t_rr, rr_ms) where rr_ms = 60000/bpm."""
     from scipy.signal import find_peaks, butter, filtfilt
     ecg = np.asarray(ecg, dtype=float).ravel()
     nyq = fs / 2.0
@@ -209,35 +230,28 @@ def _compute_rr_from_ecg(ecg, fs):
     peaks, _ = find_peaks(ecg_n, height=0.3, distance=int(0.4 * fs))
     if len(peaks) < 2:
         return np.array([]), np.array([])
-    # RR interval in ms = (samples between peaks / fs) * 1000
     rr_samples = np.diff(peaks)
     rr_ms      = (rr_samples / fs) * 1000.0
     t_rr       = (peaks[:-1] + peaks[1:]) / 2.0 / fs
-    # Filter physiologically valid RR (240 ms = 250 bpm, 2000 ms = 30 bpm)
     valid = (rr_ms >= 240) & (rr_ms <= 2000)
     return t_rr[valid], rr_ms[valid]
 
 
 def _plot_ecg_rr(ecg, fs, stress_intervals, calming_intervals):
-    """Plot RR interval (ms) derived from ECG R-peak detection."""
     t_rr, rr_ms = _compute_rr_from_ecg(ecg, fs)
     fig, ax = plt.subplots(figsize=(11, 3.2))
-
     if len(t_rr) == 0:
         ax.text(0.5, 0.5, "No R-peaks detected.\nCheck ECG signal.",
                 ha="center", va="center", fontsize=10, color="#cc4400")
         ax.set_title("RR Interval from ECG", fontsize=11, fontweight="bold")
         fig.tight_layout()
         return fig
-
     k = min(11, len(rr_ms))
-    rr_smooth  = np.convolve(rr_ms, np.ones(k)/k, mode="same")
-    rr_mean    = float(np.mean(rr_ms))
-    rr_std     = float(np.std(rr_ms))
-    # Short RR = fast HR = stress; long RR = slow HR = relaxed
-    thr_low    = rr_mean - rr_std   # below = tachycardia / stress
-    thr_high   = rr_mean + rr_std   # above = bradycardia / relaxed
-
+    rr_smooth = np.convolve(rr_ms, np.ones(k)/k, mode="same")
+    rr_mean   = float(np.mean(rr_ms))
+    rr_std    = float(np.std(rr_ms))
+    thr_low   = rr_mean - rr_std
+    thr_high  = rr_mean + rr_std
     ax.scatter(t_rr, rr_ms, s=6, color="#9933aa", alpha=0.35, zorder=2,
                label="Instantaneous RR (ms)")
     ax.plot(t_rr, rr_smooth, color="#660099", lw=1.8, zorder=4,
@@ -252,8 +266,6 @@ def _plot_ecg_rr(ecg, fs, stress_intervals, calming_intervals):
                label=f"−1σ {thr_low:.0f} ms (stress thr.)")
     ax.axhline(thr_high, color="#0055cc", lw=1.0, ls=":",
                label=f"+1σ {thr_high:.0f} ms (relax thr.)")
-
-    # Shade windows where smoothed RR is below stress threshold (short RR = stress)
     in_stress, seg_start = False, 0.0
     for i in range(len(t_rr)):
         if rr_smooth[i] < thr_low and not in_stress:
@@ -263,19 +275,15 @@ def _plot_ecg_rr(ecg, fs, stress_intervals, calming_intervals):
             in_stress = False
     if in_stress:
         ax.axvspan(seg_start, t_rr[-1], color="#ffcccc", alpha=0.55)
-
     for s, e in calming_intervals:
         ax.axvspan(s, e, color="#b6f0c8", alpha=0.22)
     for s, e in stress_intervals:
         ax.axvspan(s, e, color="#ffb3b3", alpha=0.18)
-
-    ax.set_ylim(max(240, rr_mean - 4*rr_std),
-                min(2000, rr_mean + 4*rr_std))
+    ax.set_ylim(max(240, rr_mean - 4*rr_std), min(2000, rr_mean + 4*rr_std))
     ax.set_xlabel("Time (s)", fontsize=9)
     ax.set_ylabel("RR interval (ms)", fontsize=9)
-    ax.set_title(
-        "RR Interval from ECG — red zone: short RR = fast HR = potential stress",
-        fontsize=10, fontweight="bold")
+    ax.set_title("RR Interval from ECG — red zone: short RR = fast HR = potential stress",
+                 fontsize=10, fontweight="bold")
     ax.legend(fontsize=8, loc="upper right", framealpha=0.75, ncol=2)
     ax.grid(True, alpha=0.22)
     fig.tight_layout()
@@ -394,148 +402,59 @@ def _plot_global_stress_probability(stress_map, stress_intervals,
 
 def _plot_global_heatmap_mean(stress_map, stress_intervals,
                                calming_intervals, model_name=""):
-    from scipy.signal import hilbert
-
     sig_names = list(stress_map.keys())
-
     if not sig_names:
         fig = plt.figure(figsize=(_FIG_W, _FIG_H))
-        ax = fig.add_axes([_LEFT, 0.18, _RIGHT - _LEFT, 0.72])
+        ax  = fig.add_axes([_LEFT, 0.18, _RIGHT - _LEFT, 0.72])
         ax.text(0.5, 0.5, "No results.", ha="center", va="center")
         return fig
-
-    # Tiempo de referencia (la señal con más ventanas)
     t_ref = max((stress_map[s][0] for s in sig_names), key=len)
-
-    t_min = t_ref[0]
-    t_max = t_ref[-1]
-
-    # Interpolar probabilidades de todas las señales
-    rows = []
-    for s in sig_names:
-        t, _, scores = stress_map[s]
-
-        if len(t) < 2:
-            continue
-
-        interp_scores = np.interp(
-            t_ref,
-            t,
-            scores,
-            left=np.nan,
-            right=np.nan,
-        )
-
-        rows.append(interp_scores)
-
-    rows = np.array(rows)
-
-    # Media entre señales
-    mean_prob = np.nanmean(rows, axis=0)
-
-    # Sustituir NaN por la media
-    mean_prob = np.nan_to_num(mean_prob, nan=np.nanmean(mean_prob))
-
-    # ===============================
-    # ENVOLVENTE (Hilbert + suavizado)
-    # ===============================
-    analytic_signal = scipy.signal.hilbert(mean_prob)
-    envelope = np.abs(analytic_signal)
-
-    # Suavizado de la envolvente
-    window = min(21, len(envelope))
-    if window % 2 == 0:
-        window -= 1
-    if window >= 5:
-        envelope = scipy.signal.savgol_filter(envelope, window_length=window, polyorder=3)
-
-    # ===============================
-    # NORMALIZACIÓN [0,1]
-    # ===============================
-    envelope = (
-        envelope - np.min(envelope)
-    ) / (np.max(envelope) - np.min(envelope) + 1e-12)    # ===============================
-    # FIGURA
-    # ===============================
-    fig = plt.figure(figsize=(_FIG_W, _FIG_H))
-
-    ax_heat = fig.add_axes([_LEFT, 0.32, _RIGHT - _LEFT, 0.52])
+    t_min, t_max = t_ref[0], t_ref[-1]
+    rows = [np.interp(t_ref, stress_map[s][0], stress_map[s][2],
+                      left=np.nan, right=np.nan)
+            for s in sig_names if len(stress_map[s][0]) > 1]
+    mean_row = np.nanmean(np.array(rows), axis=0)
+    fig      = plt.figure(figsize=(_FIG_W, _FIG_H))
+    ax_heat  = fig.add_axes([_LEFT, 0.32, _RIGHT - _LEFT, 0.52])
     ax_phase = fig.add_axes([_LEFT, 0.10, _RIGHT - _LEFT, 0.18])
-    ax_cbar = fig.add_axes([_CBAR_LEFT, 0.32, _CBAR_W, 0.52])
-
-    im = ax_heat.imshow(
-        envelope[np.newaxis, :],
-        aspect="auto",
-        cmap=STRESS_CMAP,
-        vmin=0,
-        vmax=1,
-        extent=[t_min, t_max, 0.5, -0.5],
-        interpolation="bilinear",
-    )
-
+    ax_cbar  = fig.add_axes([_CBAR_LEFT, 0.32, _CBAR_W, 0.52])
+    im = ax_heat.imshow(mean_row[np.newaxis, :], aspect="auto",
+                         cmap=STRESS_CMAP, vmin=0.0, vmax=1.0,
+                         extent=[t_min, t_max, 0.5, -0.5],
+                         interpolation="bilinear")
     ax_heat.set_yticks([0])
-    ax_heat.set_yticklabels(["Envelope"], fontsize=9)
+    ax_heat.set_yticklabels(["Mean"], fontsize=9)
     ax_heat.set_xticks([])
-
-    title = "Stress probability envelope heatmap"
-
-    if model_name:
-        title += f"  [{model_name}]"
-
+    title = "Mean stress probability heatmap"
+    if model_name: title += f"  [{model_name}]"
     ax_heat.set_title(title, fontsize=11, fontweight="bold", pad=5)
-
-    # Líneas de las fases
     for s, e in calming_intervals:
         ax_heat.axvline(s, color="#00aa44", lw=1.0, ls="--", alpha=0.7)
         ax_heat.axvline(e, color="#00aa44", lw=1.0, ls="--", alpha=0.7)
-
     for s, e in stress_intervals:
         ax_heat.axvline(s, color="#cc0000", lw=1.0, ls="--", alpha=0.7)
         ax_heat.axvline(e, color="#cc0000", lw=1.0, ls="--", alpha=0.7)
-
     cbar = fig.colorbar(im, cax=ax_cbar)
-    cbar.set_label("Normalized envelope", fontsize=8)
-    cbar.set_ticks([0, 0.25, 0.5, 0.75, 1])
+    cbar.set_label("P(stress)", fontsize=8)
+    cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
     cbar.ax.tick_params(labelsize=7)
-
-    # Barra inferior de fases
     ax_phase.set_xlim(t_min, t_max)
     ax_phase.set_ylim(0, 1)
     ax_phase.set_yticks([])
     ax_phase.set_xlabel("Time (s)", fontsize=9)
-
     ax_phase.axhspan(0, 1, color="#dddddd", alpha=0.4)
-
     for s, e in calming_intervals:
         ax_phase.axvspan(s, e, color="#b6f0c8", alpha=0.9)
-        ax_phase.text(
-            (s + e) / 2,
-            0.5,
-            "Calming",
-            ha="center",
-            va="center",
-            fontsize=7,
-            color="#1a6b3a",
-            fontweight="bold",
-        )
-
+        ax_phase.text((s+e)/2, 0.5, "Calming", ha="center", va="center",
+                      fontsize=7, color="#1a6b3a", fontweight="bold")
     for s, e in stress_intervals:
         ax_phase.axvspan(s, e, color="#ffb3b3", alpha=0.9)
-        ax_phase.text(
-            (s + e) / 2,
-            0.5,
-            "Stress",
-            ha="center",
-            va="center",
-            fontsize=7,
-            color="#aa2222",
-            fontweight="bold",
-        )
-
+        ax_phase.text((s+e)/2, 0.5, "Stress", ha="center", va="center",
+                      fontsize=7, color="#aa2222", fontweight="bold")
     for spine in ["top", "right", "left"]:
         ax_phase.spines[spine].set_visible(False)
-
     return fig
+
 
 # ── Per-signal plot functions ─────────────────────────────────────────────────
 
@@ -587,48 +506,6 @@ def _open_popup(fig, title):
     popup.protocol("WM_DELETE_WINDOW", popup.destroy)
 
 
-# ── Boxplots with bigger font ─────────────────────────────────────────────────
-
-def _plot_boxplots_big(phase_features, signal_name):
-    """Wrapper around plot_boxplots with larger axis font sizes."""
-    from app.core.plotter import FEATURE_NAMES as FN, FEATURE_DIM as FD
-    phase_labels = list(phase_features.keys())
-    colors       = ["#5599dd", "#55bb77", "#8877dd", "#dd5555"]
-
-    fig, axs = plt.subplots(1, FD, figsize=(4 * FD, 4))
-    fig.suptitle(f"Feature Distribution — {signal_name}",
-                 fontsize=13, fontweight="bold")
-
-    for fi, feat_name in enumerate(FN):
-        ax = axs[fi]
-        data_per_phase = [
-            phase_features[ph][:, fi]
-            if phase_features[ph].ndim == 2 and phase_features[ph].shape[1] > fi
-            else np.array([])
-            for ph in phase_labels
-        ]
-        bp = ax.boxplot(data_per_phase, patch_artist=True,
-                        medianprops=dict(color="black", lw=1.5))
-        for patch, col in zip(bp["boxes"], colors[:len(phase_labels)]):
-            patch.set_facecolor(col)
-            patch.set_alpha(0.7)
-
-        all_vals = np.concatenate([d for d in data_per_phase if len(d) > 0])
-        if len(all_vals) > 0:
-            ax.set_ylim(np.percentile(all_vals, 2),
-                        np.percentile(all_vals, 98))
-
-        ax.set_xticks(range(1, len(phase_labels) + 1))
-        # Bigger font for x tick labels
-        ax.set_xticklabels(phase_labels, fontsize=11, rotation=15)
-        ax.tick_params(axis="y", labelsize=10)
-        ax.set_title(feat_name, fontsize=11, fontweight="bold")
-        ax.grid(True, axis="y", alpha=0.3)
-
-    fig.tight_layout()
-    return fig
-
-
 # ── Main analysis window ──────────────────────────────────────────────────────
 
 class AnalysisWindow(ctk.CTkFrame):
@@ -644,13 +521,11 @@ class AnalysisWindow(ctk.CTkFrame):
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         self._figs: list[plt.Figure] = []
-
         self._signals:           dict = {}
         self._fs_map:            dict = {}
         self._stress_intervals:  list = []
         self._calming_intervals: list = []
-        self._all_stress_maps:   dict = {}  # {clf_name: stress_map}
-
+        self._all_stress_maps:   dict = {}
         self._sig_vars:   dict = {}
         self._plot_vars:  dict = {}
         self._clf_vars:   dict = {}
@@ -658,21 +533,16 @@ class AnalysisWindow(ctk.CTkFrame):
         self._step_var    = None
         self._status_var  = None
         self._results_frame = None
-
         self._build_layout()
-
-    # ── Layout ────────────────────────────────────────────────────────────────
 
     def _build_layout(self):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
-
         self._ctrl = ctk.CTkScrollableFrame(self, width=230)
         self._ctrl.grid(row=0, column=0, sticky="ns", padx=(6,2), pady=6)
         ctk.CTkLabel(self._ctrl, text="Analysis controls",
                      font=("Arial", 13, "bold")).pack(anchor="w", pady=(8,4))
         self._build_controls()
-
         self._results_frame = ctk.CTkFrame(self)
         self._results_frame.grid(row=0, column=1, sticky="nsew",
                                   padx=(2,6), pady=6)
@@ -684,7 +554,6 @@ class AnalysisWindow(ctk.CTkFrame):
 
     def _build_controls(self):
         ctrl = self._ctrl
-
         self._sig_section = ctk.CTkFrame(ctrl, fg_color="transparent")
         self._sig_section.pack(fill="x", pady=(0,6))
         ctk.CTkLabel(self._sig_section, text="Signals to analyse",
@@ -703,10 +572,8 @@ class AnalysisWindow(ctk.CTkFrame):
             ctk.CTkCheckBox(ctrl, text=clf_name, variable=var,
                             font=("Arial", 11)).pack(anchor="w", padx=4, pady=1)
         if not CLASSIFIERS:
-            ctk.CTkLabel(ctrl,
-                         text="No classifiers available.\nInstall sklearn/lightgbm.",
-                         text_color="#cc4400",
-                         font=("Arial", 10)).pack(anchor="w", padx=4)
+            ctk.CTkLabel(ctrl, text="No classifiers available.",
+                         text_color="#cc4400", font=("Arial", 10)).pack(anchor="w", padx=4)
 
         ctk.CTkLabel(ctrl, text="Plot types",
                      font=("Arial", 11, "bold")).pack(anchor="w", pady=(10,2))
@@ -720,14 +587,12 @@ class AnalysisWindow(ctk.CTkFrame):
         ctk.CTkLabel(ctrl, text="Window size (s)",
                      font=("Arial", 11, "bold")).pack(anchor="w", pady=(10,2))
         self._window_var = ctk.StringVar(value=str(RF_WINDOW_SEC))
-        ctk.CTkEntry(ctrl, textvariable=self._window_var,
-                     height=28).pack(fill="x", padx=4)
+        ctk.CTkEntry(ctrl, textvariable=self._window_var, height=28).pack(fill="x", padx=4)
 
         ctk.CTkLabel(ctrl, text="Step size (s)",
                      font=("Arial", 11, "bold")).pack(anchor="w", pady=(6,2))
         self._step_var = ctk.StringVar(value=str(RF_STEP_SEC))
-        ctk.CTkEntry(ctrl, textvariable=self._step_var,
-                     height=28).pack(fill="x", padx=4)
+        ctk.CTkEntry(ctrl, textvariable=self._step_var, height=28).pack(fill="x", padx=4)
 
         ctk.CTkButton(ctrl, text="▶  Run analysis",
                       height=38, fg_color="#336699", hover_color="#224477",
@@ -738,16 +603,12 @@ class AnalysisWindow(ctk.CTkFrame):
                      text_color="gray", font=("Arial", 10),
                      wraplength=210).pack(padx=4, pady=2)
 
-    # ── Public API ────────────────────────────────────────────────────────────
-
     def load_data(self, signals, fs_map, stress_intervals, calming_intervals):
         self._signals           = signals
         self._fs_map            = fs_map
         self._stress_intervals  = stress_intervals
         self._calming_intervals = calming_intervals
         self._refresh_signal_checkboxes()
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _refresh_signal_checkboxes(self):
         for w in self._sig_section.winfo_children():
@@ -787,7 +648,6 @@ class AnalysisWindow(ctk.CTkFrame):
         self.update_idletasks()
 
     def _clear_results(self):
-        """Clear results area only — does NOT wipe signal data."""
         for fig in self._figs:
             try:
                 plt.close(fig)
@@ -796,7 +656,6 @@ class AnalysisWindow(ctk.CTkFrame):
         self._figs.clear()
         plt.close("all")
         self._all_stress_maps = {}
-
         children = list(self._results_frame.winfo_children())
         def _do_destroy():
             for w in children:
@@ -806,12 +665,10 @@ class AnalysisWindow(ctk.CTkFrame):
                 except Exception:
                     pass
         self._results_frame.after_idle(_do_destroy)
-
         self._ctrl.grid()
         self.grid_columnconfigure(0, weight=0)
 
     def reset_for_new_subject(self):
-        """Called from app_window on Reset App."""
         self._clear_results()
         self._signals           = {}
         self._fs_map            = {}
@@ -824,8 +681,7 @@ class AnalysisWindow(ctk.CTkFrame):
                                 model_name=""):
         n_stressed = int(preds.sum())
         n_total    = len(preds)
-        lbl = (f"  [{model_name}]  " if model_name else "  ")
-        lbl += f"Stressed windows: {n_stressed} / {n_total}   ·   Mean prob: {scores.mean():.2f}"
+        lbl = f"  Stressed windows: {n_stressed} / {n_total}   ·   Mean prob: {scores.mean():.2f}"
         frame = ctk.CTkFrame(parent, fg_color="#336699", corner_radius=8)
         frame.grid(row=row, column=0, sticky="ew", padx=6, pady=(8,2))
         ctk.CTkLabel(frame, text=lbl, font=("Arial", 11, "bold"),
@@ -836,7 +692,6 @@ class AnalysisWindow(ctk.CTkFrame):
         outer = ctk.CTkFrame(parent, fg_color="transparent")
         outer.grid(row=row, column=0, sticky="ew", padx=6, pady=4)
         outer.grid_columnconfigure(0, weight=1)
-
         header = ctk.CTkFrame(outer, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew")
         header.grid_columnconfigure(0, weight=1)
@@ -845,11 +700,9 @@ class AnalysisWindow(ctk.CTkFrame):
                          anchor="w").grid(row=0, column=0, sticky="w", padx=4)
         popup_title = title or "Plot"
         ctk.CTkButton(header, text="⛶  Expand", width=90, height=24,
-                      font=("Arial", 10), fg_color="#4526FA",
-                      hover_color="#A3A3A3",
+                      font=("Arial", 10), fg_color="#4526FA", hover_color="#A3A3A3",
                       command=lambda f=fig, t=popup_title: _open_popup(f, t)
                       ).grid(row=0, column=1, sticky="e", padx=4)
-
         canvas = FigureCanvasTkAgg(fig, master=outer)
         canvas.draw()
         canvas.get_tk_widget().grid(row=1, column=0, sticky="ew")
@@ -859,58 +712,65 @@ class AnalysisWindow(ctk.CTkFrame):
                      anchor="w").grid(row=row, column=0, sticky="ew",
                                       padx=8, pady=(10,2))
 
-    # ── CSV export popup ──────────────────────────────────────────────────────
+    def _add_collapsible_clf_section(self, parent, clf_name, start_row):
+        is_expanded   = ctk.BooleanVar(value=True)
+        content_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        content_frame.grid(row=start_row + 1, column=0, sticky="ew", padx=0, pady=0)
+        content_frame.grid_columnconfigure(0, weight=1)
+
+        def _toggle():
+            if is_expanded.get():
+                content_frame.grid_remove()
+                is_expanded.set(False)
+                btn.configure(text=f"▶  {clf_name}")
+            else:
+                content_frame.grid()
+                is_expanded.set(True)
+                btn.configure(text=f"▼  {clf_name}")
+
+        btn = ctk.CTkButton(parent, text=f"▼  {clf_name}",
+                            font=("Arial", 14, "bold"),
+                            fg_color="#224466", hover_color="#336699",
+                            anchor="w", command=_toggle)
+        btn.grid(row=start_row, column=0, sticky="ew", padx=6, pady=(10,2))
+        return content_frame, start_row + 2
 
     def _ask_export_csv(self):
-        """Show popup asking user if they want to download the CSV."""
         if not self._all_stress_maps:
             return
-        answer = messagebox.askyesno(
-            "Descargar CSV",
-            "¿Descargar .csv con estimación de estrés\n"
-            "con los modelos seleccionados?",
-        )
-        if answer:
+        if messagebox.askyesno(
+            "Download CSV",
+            "Download .csv with stress probability estimates\n"
+            "for the selected models?",
+        ):
             _export_stress_csv(self._all_stress_maps, self)
-
-    # ── Run ───────────────────────────────────────────────────────────────────
 
     def _run(self):
         self._clear_results()
-
         selected_sigs  = self._selected_signals()
         selected_plots = self._selected_plots()
         selected_clfs  = self._selected_classifiers()
         window_sec, step_sec = self._get_window_step()
 
         if not selected_sigs:
-            self._set_status("Select at least one signal.")
-            return
+            self._set_status("Select at least one signal."); return
         if not selected_plots:
-            self._set_status("Select at least one plot type.")
-            return
+            self._set_status("Select at least one plot type."); return
         if not self._signals:
-            self._set_status("Load a subject first.")
-            return
+            self._set_status("Load a subject first."); return
         if not selected_clfs:
-            self._set_status("Select at least one classifier.")
-            return
+            self._set_status("Select at least one classifier."); return
 
         self._set_status("Running…")
         self.update_idletasks()
 
-        signals = {s: self._signals[s] for s in selected_sigs
-                   if s in self._signals}
-
+        signals = {s: self._signals[s] for s in selected_sigs if s in self._signals}
         t_phys, y_phys = build_physiological_labels(
-            signals, self._fs_map, window_sec, step_sec
-        )
+            signals, self._fs_map, window_sec, step_sec)
 
-        # Clear leftover widgets
         for w in list(self._results_frame.winfo_children()):
             try:
-                if w.winfo_exists():
-                    w.destroy()
+                if w.winfo_exists(): w.destroy()
             except Exception:
                 pass
 
@@ -932,8 +792,7 @@ class AnalysisWindow(ctk.CTkFrame):
         global_scroll.grid_columnconfigure(0, weight=1)
 
         tab_rows = {sig: 0 for sig in tabs}
-        g_row    = 0
-        n_done   = 0
+        g_row, n_done = 0, 0
 
         for clf_name in selected_clfs:
             self._set_status(f"Running {clf_name}…")
@@ -943,27 +802,21 @@ class AnalysisWindow(ctk.CTkFrame):
             per_sig:    dict = {}
 
             for sig_name in selected_sigs:
-                if sig_name not in signals:
-                    continue
+                if sig_name not in signals: continue
                 fs = self._fs_map.get(sig_name, 2000)
                 X_all, t_centers = extract_features_windowed(
-                    signals[sig_name], fs, sig_name, window_sec, step_sec
-                )
-                if len(X_all) == 0:
-                    continue
+                    signals[sig_name], fs, sig_name, window_sec, step_sec)
+                if len(X_all) == 0: continue
                 n_win = min(len(X_all), len(t_phys))
-                if n_win == 0:
-                    continue
+                if n_win == 0: continue
                 X_train = X_all[:n_win]
                 y_train = y_phys[:n_win]
-                if len(np.unique(y_train)) < 2:
-                    continue
+                if len(np.unique(y_train)) < 2: continue
                 try:
                     clf = _build_classifier(clf_name)
                     preds, scores = _fit_predict(clf, X_train, y_train, X_all)
                 except Exception as ex:
-                    self._set_status(f"{clf_name} failed: {ex}")
-                    continue
+                    self._set_status(f"{clf_name} failed: {ex}"); continue
 
                 stress_map[sig_name] = (t_centers, preds, scores)
                 per_sig[sig_name] = {
@@ -978,16 +831,11 @@ class AnalysisWindow(ctk.CTkFrame):
                                        self._stress_intervals),
                 }
 
-            if not stress_map:
-                continue
-
-            # Store for CSV export
+            if not stress_map: continue
             self._all_stress_maps[clf_name] = stress_map
 
-            # Fill per-signal tabs
             for sig_name, res in per_sig.items():
-                if sig_name not in tabs:
-                    continue
+                if sig_name not in tabs: continue
                 parent    = tabs[sig_name]
                 t_centers = res["t_centers"]
                 preds     = res["preds"]
@@ -995,99 +843,78 @@ class AnalysisWindow(ctk.CTkFrame):
                 row       = tab_rows[sig_name]
                 fs        = self._fs_map.get(sig_name, 2000)
 
-                if len(selected_clfs) > 1:
-                    self._add_section_label(parent, f"── {clf_name} ──", row)
-                    row += 1
+                content, row = self._add_collapsible_clf_section(parent, clf_name, row)
+                inner_row = 0
+                content.grid_columnconfigure(0, weight=1)
 
-                self._add_section_header_in(
-                    parent, sig_name, preds, scores, row, clf_name)
-                row += 1
+                self._add_section_header_in(content, sig_name, preds, scores, inner_row)
+                inner_row += 1
 
                 if "boxplots" in selected_plots:
                     fig = _plot_boxplots_big(res["phase_feats"], sig_name)
-                    self._add_plot_in(
-                        parent, f"Feature distributions  [{clf_name}]", fig, row)
-                    row += 1
+                    self._add_plot_in(content, f"Feature distributions — {clf_name}", fig, inner_row)
+                    inner_row += 1
 
                 if "roc" in selected_plots:
                     fig = plot_roc(res["y_session"], scores, sig_name)
-                    self._add_plot_in(
-                        parent, f"ROC curve  [{clf_name}]", fig, row)
-                    row += 1
+                    self._add_plot_in(content, f"ROC curve — {clf_name}", fig, inner_row)
+                    inner_row += 1
 
                 if "timeline" in selected_plots:
-                    fig = _plot_stress_timeline(
-                        t_centers, preds, scores, sig_name,
-                        self._stress_intervals, clf_name)
-                    self._add_plot_in(
-                        parent, f"Stress timeline  [{clf_name}]", fig, row)
-                    row += 1
+                    fig = _plot_stress_timeline(t_centers, preds, scores, sig_name,
+                                                self._stress_intervals, clf_name)
+                    self._add_plot_in(content, f"Stress timeline — {clf_name}", fig, inner_row)
+                    inner_row += 1
 
                 if "rr_ecg" in selected_plots and sig_name == "ECG":
                     if clf_name == selected_clfs[0]:
-                        fig = _plot_ecg_rr(
-                            signals[sig_name], fs,
-                            self._stress_intervals, self._calming_intervals)
-                        self._add_plot_in(
-                            parent, "RR Interval from ECG", fig, row)
-                        row += 1
+                        fig = _plot_ecg_rr(signals[sig_name], fs,
+                                           self._stress_intervals, self._calming_intervals)
+                        self._add_plot_in(content, "RR Interval from ECG", fig, inner_row)
+                        inner_row += 1
 
                 if "resp_rate" in selected_plots and sig_name == "RESP":
                     if clf_name == selected_clfs[0]:
-                        fig = _plot_resp_rate(
-                            signals[sig_name], fs,
-                            self._stress_intervals, self._calming_intervals)
-                        self._add_plot_in(
-                            parent, "Respiratory Rate (rpm) from RESP", fig, row)
-                        row += 1
+                        fig = _plot_resp_rate(signals[sig_name], fs,
+                                              self._stress_intervals, self._calming_intervals)
+                        self._add_plot_in(content, "Respiratory Rate (rpm) from RESP", fig, inner_row)
+                        inner_row += 1
 
                 tab_rows[sig_name] = row
 
-            # Global tab for this classifier
-            if len(selected_clfs) > 1:
-                self._add_section_label(
-                    global_scroll, f"── {clf_name} ──", g_row)
-                g_row += 1
+            content_g, g_row = self._add_collapsible_clf_section(global_scroll, clf_name, g_row)
+            content_g.grid_columnconfigure(0, weight=1)
+            inner_g = 0
 
-            self._add_section_label(
-                global_scroll, f"Combined stress probability  [{clf_name}]", g_row)
-            g_row += 1
+            self._add_section_label(content_g, f"Combined stress probability — {clf_name}", inner_g)
+            inner_g += 1
             fig_prob = _plot_global_stress_probability(
-                stress_map, self._stress_intervals,
-                self._calming_intervals, clf_name)
-            self._add_plot_in(global_scroll, "", fig_prob, g_row)
-            g_row += 1
+                stress_map, self._stress_intervals, self._calming_intervals, clf_name)
+            self._add_plot_in(content_g, "", fig_prob, inner_g)
+            inner_g += 1
 
-            self._add_section_label(
-                global_scroll, f"Mean stress heatmap  [{clf_name}]", g_row)
-            g_row += 1
+            self._add_section_label(content_g, f"Mean stress heatmap — {clf_name}", inner_g)
+            inner_g += 1
             fig_heat = _plot_global_heatmap_mean(
-                stress_map, self._stress_intervals,
-                self._calming_intervals, clf_name)
-            self._add_plot_in(global_scroll, "", fig_heat, g_row)
-            g_row += 1
+                stress_map, self._stress_intervals, self._calming_intervals, clf_name)
+            self._add_plot_in(content_g, "", fig_heat, inner_g)
 
             n_done += 1
 
-        # BPM / RESP global overviews (once)
         if "rr_ecg" in selected_plots and "ECG" in signals:
-            self._add_section_label(
-                global_scroll, "RR Interval from ECG — global overview", g_row)
+            self._add_section_label(global_scroll, "RR Interval from ECG — global overview", g_row)
             g_row += 1
-            fig_rr = _plot_ecg_rr(
-                signals["ECG"], self._fs_map.get("ECG", 2000),
-                self._stress_intervals, self._calming_intervals)
+            fig_rr = _plot_ecg_rr(signals["ECG"], self._fs_map.get("ECG", 2000),
+                                   self._stress_intervals, self._calming_intervals)
             self._add_plot_in(global_scroll, "", fig_rr, g_row)
             g_row += 1
 
         if "resp_rate" in selected_plots and "RESP" in signals:
             self._add_section_label(
-                global_scroll,
-                "Respiratory Rate (rpm) from RESP — global overview", g_row)
+                global_scroll, "Respiratory Rate (rpm) from RESP — global overview", g_row)
             g_row += 1
-            fig_resp = _plot_resp_rate(
-                signals["RESP"], self._fs_map.get("RESP", 2000),
-                self._stress_intervals, self._calming_intervals)
+            fig_resp = _plot_resp_rate(signals["RESP"], self._fs_map.get("RESP", 2000),
+                                       self._stress_intervals, self._calming_intervals)
             self._add_plot_in(global_scroll, "", fig_resp, g_row)
 
         if n_done == 0:
@@ -1097,10 +924,7 @@ class AnalysisWindow(ctk.CTkFrame):
             self._set_status("No results.")
             return
 
-        self._set_status(
-            f"Done — {n_done} classifier(s), {len(tabs)} signal(s) analysed.")
+        self._set_status(f"Done — {n_done} classifier(s), {len(tabs)} signal(s) analysed.")
         self._ctrl.grid_remove()
         self.grid_columnconfigure(0, weight=0)
-
-        # Ask user if they want to export CSV
         self.after(300, self._ask_export_csv)
