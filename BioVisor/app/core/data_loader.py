@@ -35,12 +35,19 @@ def _load_biopac_csv(path: str) -> np.ndarray | None:
 
 def _resample_to_target(signal: np.ndarray, fs_orig: float,
                          fs_target: float = 2000.0) -> np.ndarray:
-    """Resample signal from fs_orig to fs_target using linear interpolation."""
+    """Resample signal from fs_orig to fs_target using linear interpolation.
+
+    La duracion real (len / fs_orig) se conserva: el numero de muestras
+    de salida es round(duracion * fs_target), asi que el eje de tiempo
+    posterior (len / fs_target) coincide con la duracion original.
+    """
     if abs(fs_orig - fs_target) < 0.01:
-        return signal
+        return signal.astype(np.float32)
     duration   = len(signal) / fs_orig
     n_orig     = len(signal)
     n_target   = int(round(duration * fs_target))
+    if n_target < 2 or n_orig < 2:
+        return signal.astype(np.float32)
     t_orig     = np.linspace(0, duration, n_orig,   endpoint=False)
     t_target   = np.linspace(0, duration, n_target, endpoint=False)
     return np.interp(t_target, t_orig, signal).astype(np.float32)
@@ -54,9 +61,17 @@ def _load_empatica_csv(
     """
     Empatica E4 format:
       Row 0: Unix timestamp(s)
-      Row 1: sample rate(s) in Hz
+      Row 1: sample rate(s) in Hz   <- se IGNORA a proposito
       Row 2+: data
-    ACC has 3 columns → returns magnitude.
+    ACC has 3 columns -> returns magnitude.
+
+    IMPORTANTE
+    ----------
+    La frecuencia de muestreo NO se lee del fichero. Se usa el valor que el
+    usuario indica en el popup de carga (fs_map[sig_type], sembrado desde la
+    config del SetupWindow). Con esa fs se remuestrea la senal a 2000 Hz
+    conservando su duracion real. Tras el remuestreo, fs_map[sig_type] pasa
+    a 2000 Hz.
     """
     filename = os.path.basename(path)
     try:
@@ -66,14 +81,14 @@ def _load_empatica_csv(
         if len(lines) < 3:
             return None
 
-        # Row 1: sample rate (first value)
-        row1 = lines[1].strip().split(",")
-        try:
-            fs = float(row1[0])
-        except ValueError:
-            fs = 1.0
+        # -- Frecuencia de muestreo tomada del POPUP (no del fichero) ----------
+        fs_orig = fs_map.get(sig_type)
+        if fs_orig is None or fs_orig <= 0:
+            print(f"[WARN] Empatica {filename}: no hay fs para '{sig_type}' "
+                  f"en el popup de carga; se omite esta senal.")
+            return None
 
-        # Data rows from row 2 onwards
+        # -- Datos: desde la fila 2 en adelante --------------------------------
         rows = []
         for line in lines[2:]:
             vals = line.strip().split(",")
@@ -87,17 +102,25 @@ def _load_empatica_csv(
 
         arr = np.array(rows)
 
-        # ACC: 3 columns → magnitude √(x²+y²+z²)
+        # ACC: 3 columnas -> magnitud sqrt(x^2 + y^2 + z^2)
         if arr.ndim == 2 and arr.shape[1] >= 3:
-            signal = np.sqrt(arr[:, 0]**2 + arr[:, 1]**2 + arr[:, 2]**2)
+            signal = np.sqrt(arr[:, 0] ** 2 + arr[:, 1] ** 2 + arr[:, 2] ** 2)
         elif arr.ndim == 2:
             signal = arr[:, 0]
         else:
             signal = arr
 
-        fs_map[sig_type] = fs
-        signal = _resample_to_target(signal, fs_orig=fs, fs_target=2000.0)
-        fs_map[sig_type] = 2000.0   # after resampling all signals are at 2000 Hz
+        signal = np.asarray(signal, dtype=float).ravel()
+        if signal.size < 2:
+            return None
+
+        dur = signal.size / fs_orig
+        print(f"[EMPATICA] {sig_type:5s}: {signal.size} muestras @ {fs_orig} Hz "
+              f"(popup) -> duracion {dur:.1f}s -> remuestreo a 2000 Hz")
+
+        # -- Remuestreo a 2000 Hz usando la fs del popup -----------------------
+        signal = _resample_to_target(signal, fs_orig=fs_orig, fs_target=2000.0)
+        fs_map[sig_type] = 2000.0   # tras remuestrear, todas las senales van a 2000 Hz
         return signal.astype(float)
 
     except Exception as e:
@@ -142,7 +165,7 @@ def load_subject_folder(
         if sig_type is None or sig_type not in selected_signals or sig_type in signals:
             continue
 
-        print(f"[LOAD] {filename} → {sig_type}")
+        print(f"[LOAD] {filename} -> {sig_type}")
 
         if device == "Biopac":
             data = _load_biopac_csv(full_path)
@@ -153,7 +176,7 @@ def load_subject_folder(
             signals[sig_type] = data
             print(f"[OK]   {sig_type}: {len(data)} samples @ {fs_map.get(sig_type, '?')} Hz")
         else:
-            print(f"[FAIL] {sig_type} ← {filename}")
+            print(f"[FAIL] {sig_type} <- {filename}")
 
     if apply_filters and signals:
         from app.core.filters import clean_all
