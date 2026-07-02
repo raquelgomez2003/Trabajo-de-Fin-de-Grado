@@ -6,6 +6,7 @@ Main application window — orchestrates setup, viewer, and analysis.
 from __future__ import annotations
 import os
 import sys
+import subprocess
 import customtkinter as ctk
 from tkinter import messagebox
 import matplotlib.pyplot as plt
@@ -150,7 +151,6 @@ class AppWindow(ctk.CTk):
 
         folder = self._cfg["folder"]
         device = self._cfg["device"]
-        # Start with a fresh copy of the config fs so loader can update it
         fs_map = dict(self._cfg.get("fs", {}))
 
         popup = ctk.CTkToplevel(self)
@@ -183,7 +183,6 @@ class AppWindow(ctk.CTk):
         old_stdout = sys.stdout
         sys.stdout = _LogRedirect()
 
-        # Candidate folders depend on device type
         if device == "Biopac":
             candidates = [
                 os.path.join(folder, f"Base1_Sujeto{num}", "Biopac data"),
@@ -213,7 +212,6 @@ class AppWindow(ctk.CTk):
                     apply_filters=self._filter_var.get(),
                 )
                 if loaded:
-                    # Propagate fs values read from Empatica files back to cfg
                     self._cfg["fs"] = fs_map
                     break
             except Exception as e:
@@ -241,72 +239,145 @@ class AppWindow(ctk.CTk):
 
         popup.wait_window()
 
-        # ── Auto-load session times if CSV exists ─────────────────────────────
-        self._try_load_session_times(num)
+        # ── Session times + Empatica alignment ───────────────────────────────
+        if self._cfg.get("device") == "Empatica":
+            self._load_empatica_session(num)
+        else:
+            self._try_load_session_times(num)
 
         self._update_viewer()
 
-    def _try_load_session_times(self, num: int) -> None:
-        """
-        Look for SubjectXX_Session_Times.csv inside Base1_SujetoN
-        and auto-fill the calming/stress phase entry fields.
+    # ── Session times ─────────────────────────────────────────────────────────
 
-        CSV format (semicolon-separated):
-            calming_start;calming_end;vexing_start;vexing_end
-            502;1469;1613;2579
-        Values are in seconds.
+    def _load_empatica_session(self, num: int) -> None:
         """
-        folder = self._cfg.get("folder", "")
-        # Search in the subject's root folder (parent of Biopac/Empatica)
-        subject_dir = os.path.join(folder, f"Base1_Sujeto{num}")
-        if not os.path.isdir(subject_dir):
-            return
+        For Empatica sessions:
+        - If Subject*_Session_Times.csv exists inside Empatica_data:
+            load times directly (no offset needed).
+        - Otherwise:
+            compute offset via cross-correlation (align_hr_ecg.py),
+            clip all loaded signals to the ECG-matching window,
+            and fill session times from the subject-level CSV if present.
+        """
+        folder       = self._cfg.get("folder", "")
+        subject_dir  = os.path.join(folder, f"Base1_Sujeto{num}")
+        empatica_dir = os.path.join(subject_dir, "Empatica_data")
 
-        # Find any CSV that contains "Session_Times" in its name
-        csv_path = None
-        try:
-            for entry in os.scandir(subject_dir):
+        # ── Check for Session_Times inside Empatica_data ──────────────────────
+        session_csv = None
+        if os.path.isdir(empatica_dir):
+            for entry in os.scandir(empatica_dir):
                 if entry.is_file() and "session_times" in entry.name.lower():
-                    csv_path = entry.path
+                    session_csv = entry.path
                     break
-        except Exception:
+
+        if session_csv is not None:
+            # Session times available → load directly, no offset needed
+            self._fill_phase_entries_from_csv(session_csv)
+            print(f"[OK] Session times from Empatica folder: {os.path.basename(session_csv)}")
             return
 
-        if csv_path is None:
+        # ── No session times in Empatica folder → compute offset ─────────────
+        biopac_dir = os.path.join(subject_dir, "Biopac data")
+        ecg_path, hr_path = None, None
+
+        if os.path.isdir(biopac_dir):
+            for entry in os.scandir(biopac_dir):
+                if "ECG" in entry.name.upper() and entry.name.lower().endswith(".csv"):
+                    ecg_path = entry.path
+                    break
+
+        if os.path.isdir(empatica_dir):
+            for entry in os.scandir(empatica_dir):
+                if "HR" in entry.name.upper() and entry.name.lower().endswith(".csv"):
+                    hr_path = entry.path
+                    break
+
+        if ecg_path is None or hr_path is None:
+            print("[WARN] Cannot compute offset — ECG or HR not found")
+            # Still try to load session times from subject root
+            self._try_load_session_times(num)
             return
 
+        # Run align_hr_ecg.py
+        script_path = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "core", "align_hr_ecg.py"
+        ))
+
+        offset = 0
+        if os.path.exists(script_path):
+            try:
+                result = subprocess.run(
+                    [sys.executable, script_path, ecg_path, hr_path],
+                    capture_output=True, text=True, timeout=120
+                )
+                offset = int(result.stdout.strip().splitlines()[-1].strip())
+                print(f"[OK] Empatica HR offset for Subject {num}: {offset} s")
+            except Exception as e:
+                print(f"[WARN] Could not compute HR offset: {e}")
+        else:
+            print(f"[WARN] align_hr_ecg.py not found at {script_path}")
+
+        # Load session times from subject root and add offset so phases align
+        self._try_load_session_times(num)
+        if offset > 0:
+            for entry_start, entry_end in [
+                (self._e_calm_s,   self._e_calm_e),
+                (self._e_stress_s, self._e_stress_e),
+            ]:
+                try:
+                    s = int(entry_start.get())
+                    e = int(entry_end.get())
+                    entry_start.delete(0, "end")
+                    entry_start.insert(0, str(s + offset))
+                    entry_end.delete(0, "end")
+                    entry_end.insert(0, str(e + offset))
+                except ValueError:
+                    pass
+
+        self._set_status(
+            f"Subject {num} loaded\n"
+            f"{len(self._signals)} signal(s)\n"
+            f"HR offset: +{offset}s"
+        )
+
+    def _fill_phase_entries_from_csv(self, csv_path: str) -> None:
+        """Fill calming/stress entries from a semicolon-separated session times CSV."""
         try:
-            import csv
+            import csv as _csv
             with open(csv_path, newline="", encoding="utf-8-sig") as f:
-                reader = csv.DictReader(f, delimiter=";")
+                reader = _csv.DictReader(f, delimiter=";")
                 for row in reader:
-                    # Skip empty rows
-                    cs = row.get("calming_start", "").strip()
-                    ce = row.get("calming_end",   "").strip()
-                    vs = row.get("vexing_start",  "").strip()
-                    ve = row.get("vexing_end",    "").strip()
-                    # Remove thousand-separator dots (e.g. 1.469 → 1469)
-                    cs = cs.replace(".", "")
-                    ce = ce.replace(".", "")
-                    vs = vs.replace(".", "")
-                    ve = ve.replace(".", "")
+                    cs = row.get("calming_start", "").strip().replace(".", "")
+                    ce = row.get("calming_end",   "").strip().replace(".", "")
+                    vs = row.get("vexing_start",  "").strip().replace(".", "")
+                    ve = row.get("vexing_end",    "").strip().replace(".", "")
                     if not cs:
                         continue
-
-                    # Fill calming entries
-                    for entry, val in [
+                    for entry_w, val in [
                         (self._e_calm_s,   cs),
                         (self._e_calm_e,   ce),
                         (self._e_stress_s, vs),
                         (self._e_stress_e, ve),
                     ]:
-                        entry.delete(0, "end")
-                        entry.insert(0, val)
-                    break  # only first data row
-
-            print(f"[OK] Session times loaded from {os.path.basename(csv_path)}")
+                        entry_w.delete(0, "end")
+                        entry_w.insert(0, val)
+                    break
         except Exception as e:
-            print(f"[WARN] Could not read session times: {e}")
+            print(f"[WARN] Could not read {csv_path}: {e}")
+
+    def _try_load_session_times(self, num: int) -> None:
+        """Load session times from subject root folder (Biopac case)."""
+        folder      = self._cfg.get("folder", "")
+        subject_dir = os.path.join(folder, f"Base1_Sujeto{num}")
+        if not os.path.isdir(subject_dir):
+            return
+        for entry in os.scandir(subject_dir):
+            if entry.is_file() and "session_times" in entry.name.lower():
+                self._fill_phase_entries_from_csv(entry.path)
+                print(f"[OK] Session times: {entry.name}")
+                return
 
     # ── Viewer ────────────────────────────────────────────────────────────────
 
