@@ -28,7 +28,7 @@ from app.core.models import (
     FEATURE_DIM,
 )
 from app.core.config import RF_WINDOW_SEC, RF_STEP_SEC
-from app.core.plotter import plot_roc   # ← solo plot_roc, sin plot_boxplots
+from app.core.plotter import plot_roc
 
 
 # ── Stress colormap ───────────────────────────────────────────────────────────
@@ -94,7 +94,6 @@ def _build_classifier(name: str):
 
 
 def _fit_predict(clf, X_train, y_train, X_all):
-    """Fit classifier, impute NaN, return (preds, scores)."""
     import warnings
     from sklearn.impute import SimpleImputer
     from sklearn.preprocessing import StandardScaler
@@ -174,7 +173,7 @@ def _split_by_phase(X, t_centers, calming_intervals, stress_intervals):
     return result
 
 
-# ── Boxplots (local, no circular import) ─────────────────────────────────────
+# ── Boxplots ──────────────────────────────────────────────────────────────────
 
 def _plot_boxplots_big(phase_features, signal_name):
     phase_labels = list(phase_features.keys())
@@ -230,9 +229,8 @@ def _compute_rr_from_ecg(ecg, fs):
     peaks, _ = find_peaks(ecg_n, height=0.3, distance=int(0.4 * fs))
     if len(peaks) < 2:
         return np.array([]), np.array([])
-    rr_samples = np.diff(peaks)
-    rr_ms      = (rr_samples / fs) * 1000.0
-    t_rr       = (peaks[:-1] + peaks[1:]) / 2.0 / fs
+    rr_ms = (np.diff(peaks) / fs) * 1000.0
+    t_rr  = (peaks[:-1] + peaks[1:]) / 2.0 / fs
     valid = (rr_ms >= 240) & (rr_ms <= 2000)
     return t_rr[valid], rr_ms[valid]
 
@@ -248,10 +246,8 @@ def _plot_ecg_rr(ecg, fs, stress_intervals, calming_intervals):
         return fig
     k = min(11, len(rr_ms))
     rr_smooth = np.convolve(rr_ms, np.ones(k)/k, mode="same")
-    rr_mean   = float(np.mean(rr_ms))
-    rr_std    = float(np.std(rr_ms))
-    thr_low   = rr_mean - rr_std
-    thr_high  = rr_mean + rr_std
+    rr_mean, rr_std = float(np.mean(rr_ms)), float(np.std(rr_ms))
+    thr_low, thr_high = rr_mean - rr_std, rr_mean + rr_std
     ax.scatter(t_rr, rr_ms, s=6, color="#9933aa", alpha=0.35, zorder=2,
                label="Instantaneous RR (ms)")
     ax.plot(t_rr, rr_smooth, color="#660099", lw=1.8, zorder=4,
@@ -296,9 +292,7 @@ def _compute_resp_rate(resp, fs):
     from scipy.signal import find_peaks, butter, filtfilt
     resp = np.asarray(resp, dtype=float).ravel()
     nyq  = fs / 2.0
-    low  = max(0.1/nyq, 1e-4)
-    high = min(0.8/nyq, 0.99)
-    b, a = butter(2, [low, high], btype="band")
+    b, a = butter(2, [max(0.1/nyq, 1e-4), min(0.8/nyq, 0.99)], btype="band")
     resp_f = filtfilt(b, a, resp)
     peak_val = np.max(np.abs(resp_f))
     if peak_val == 0:
@@ -777,6 +771,7 @@ class AnalysisWindow(ctk.CTkFrame):
         tab_view = ctk.CTkTabview(self._results_frame)
         tab_view.pack(fill="both", expand=True, padx=2, pady=2)
 
+        # Signal tabs
         tabs: dict = {}
         for sig_name in selected_sigs:
             if sig_name in signals:
@@ -786,6 +781,7 @@ class AnalysisWindow(ctk.CTkFrame):
                 scroll.grid_columnconfigure(0, weight=1)
                 tabs[sig_name] = scroll
 
+        # Global tab
         tab_view.add("Global")
         global_scroll = ctk.CTkScrollableFrame(tab_view.tab("Global"))
         global_scroll.pack(fill="both", expand=True)
@@ -794,15 +790,53 @@ class AnalysisWindow(ctk.CTkFrame):
         tab_rows = {sig: 0 for sig in tabs}
         g_row, n_done = 0, 0
 
-        for clf_name in selected_clfs:
-            self._set_status(f"Running {clf_name}…")
+        # ── "Gráficas generales" collapsible section in Global (always first) ──
+        gen_content, g_row = self._add_collapsible_clf_section(
+            global_scroll, "Gráficas generales", g_row
+        )
+        gen_content.grid_columnconfigure(0, weight=1)
+        gen_inner = 0
+
+        # RR and RESP go inside "Gráficas generales"
+        if "rr_ecg" in selected_plots and "ECG" in signals:
+            fig_rr = _plot_ecg_rr(
+                signals["ECG"], self._fs_map.get("ECG", 2000),
+                self._stress_intervals, self._calming_intervals)
+            self._add_plot_in(gen_content, "RR Interval from ECG", fig_rr, gen_inner)
+            gen_inner += 1
+
+        if "resp_rate" in selected_plots and "RESP" in signals:
+            fig_resp = _plot_resp_rate(
+                signals["RESP"], self._fs_map.get("RESP", 2000),
+                self._stress_intervals, self._calming_intervals)
+            self._add_plot_in(gen_content, "Respiratory Rate (rpm) from RESP",
+                               fig_resp, gen_inner)
+            gen_inner += 1
+
+        if gen_inner == 0:
+            ctk.CTkLabel(gen_content, text="No general plots selected.",
+                         text_color="gray", font=("Arial", 11)).grid(
+                row=0, column=0, padx=8, pady=8, sticky="w")
+
+        # ── Per-classifier loop ───────────────────────────────────────────────
+        total_steps = len(selected_clfs) * len(selected_sigs)
+        current_step = 0
+
+        for clf_idx, clf_name in enumerate(selected_clfs):
+            self._set_status(f"Running {clf_name}… ({int(current_step/total_steps*100)}%)")
             self.update_idletasks()
 
             stress_map: dict = {}
             per_sig:    dict = {}
 
-            for sig_name in selected_sigs:
-                if sig_name not in signals: continue
+            for sig_idx, sig_name in enumerate(selected_sigs):
+                if sig_name not in signals:
+                    current_step += 1
+                    continue
+                current_step += 1
+                pct = int(current_step / total_steps * 100)
+                self._set_status(f"Running {clf_name}… ({pct}%)")
+                self.update_idletasks()
                 fs = self._fs_map.get(sig_name, 2000)
                 X_all, t_centers = extract_features_windowed(
                     signals[sig_name], fs, sig_name, window_sec, step_sec)
@@ -834,6 +868,7 @@ class AnalysisWindow(ctk.CTkFrame):
             if not stress_map: continue
             self._all_stress_maps[clf_name] = stress_map
 
+            # Fill per-signal tabs
             for sig_name, res in per_sig.items():
                 if sig_name not in tabs: continue
                 parent    = tabs[sig_name]
@@ -866,56 +901,33 @@ class AnalysisWindow(ctk.CTkFrame):
                     self._add_plot_in(content, f"Stress timeline — {clf_name}", fig, inner_row)
                     inner_row += 1
 
-                if "rr_ecg" in selected_plots and sig_name == "ECG":
-                    if clf_name == selected_clfs[0]:
-                        fig = _plot_ecg_rr(signals[sig_name], fs,
-                                           self._stress_intervals, self._calming_intervals)
-                        self._add_plot_in(content, "RR Interval from ECG", fig, inner_row)
-                        inner_row += 1
-
-                if "resp_rate" in selected_plots and sig_name == "RESP":
-                    if clf_name == selected_clfs[0]:
-                        fig = _plot_resp_rate(signals[sig_name], fs,
-                                              self._stress_intervals, self._calming_intervals)
-                        self._add_plot_in(content, "Respiratory Rate (rpm) from RESP", fig, inner_row)
-                        inner_row += 1
-
+                # RR and RESP only in "Gráficas generales", not per signal tabs
                 tab_rows[sig_name] = row
 
-            content_g, g_row = self._add_collapsible_clf_section(global_scroll, clf_name, g_row)
+            # Global tab: collapsible per classifier
+            content_g, g_row = self._add_collapsible_clf_section(
+                global_scroll, clf_name, g_row)
             content_g.grid_columnconfigure(0, weight=1)
             inner_g = 0
 
-            self._add_section_label(content_g, f"Combined stress probability — {clf_name}", inner_g)
+            self._add_section_label(
+                content_g, f"Combined stress probability — {clf_name}", inner_g)
             inner_g += 1
             fig_prob = _plot_global_stress_probability(
-                stress_map, self._stress_intervals, self._calming_intervals, clf_name)
+                stress_map, self._stress_intervals,
+                self._calming_intervals, clf_name)
             self._add_plot_in(content_g, "", fig_prob, inner_g)
             inner_g += 1
 
-            self._add_section_label(content_g, f"Mean stress heatmap — {clf_name}", inner_g)
+            self._add_section_label(
+                content_g, f"Mean stress heatmap — {clf_name}", inner_g)
             inner_g += 1
             fig_heat = _plot_global_heatmap_mean(
-                stress_map, self._stress_intervals, self._calming_intervals, clf_name)
+                stress_map, self._stress_intervals,
+                self._calming_intervals, clf_name)
             self._add_plot_in(content_g, "", fig_heat, inner_g)
 
             n_done += 1
-
-        if "rr_ecg" in selected_plots and "ECG" in signals:
-            self._add_section_label(global_scroll, "RR Interval from ECG — global overview", g_row)
-            g_row += 1
-            fig_rr = _plot_ecg_rr(signals["ECG"], self._fs_map.get("ECG", 2000),
-                                   self._stress_intervals, self._calming_intervals)
-            self._add_plot_in(global_scroll, "", fig_rr, g_row)
-            g_row += 1
-
-        if "resp_rate" in selected_plots and "RESP" in signals:
-            self._add_section_label(
-                global_scroll, "Respiratory Rate (rpm) from RESP — global overview", g_row)
-            g_row += 1
-            fig_resp = _plot_resp_rate(signals["RESP"], self._fs_map.get("RESP", 2000),
-                                       self._stress_intervals, self._calming_intervals)
-            self._add_plot_in(global_scroll, "", fig_resp, g_row)
 
         if n_done == 0:
             ctk.CTkLabel(self._results_frame,
