@@ -124,6 +124,12 @@ def _fit_predict(clf, X_train, y_train, X_all):
 # ── CSV export ────────────────────────────────────────────────────────────────
 
 def _export_stress_csv(all_stress_maps, parent_widget):
+    """
+    Export the full global stress probability time series per classifier.
+    Each column is the mean score across all signals at each time step
+    (the bold black line in the global plot).
+    Rows = time steps, columns = time_s + one score column per classifier.
+    """
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"Stress_Probability_{ts}.csv"
     path     = filedialog.asksaveasfilename(
@@ -134,26 +140,50 @@ def _export_stress_csv(all_stress_maps, parent_widget):
     if not path:
         return
     if not all_stress_maps:
-        messagebox.showwarning("Export", "No data to export.")
+        messagebox.showwarning("Save", "No data to export.")
         return
+
     try:
+        # Build a common time grid from the longest signal across all classifiers
+        all_t = []
+        for clf_data in all_stress_maps.values():
+            for t_c, _, _ in clf_data.values():
+                all_t.append(t_c)
+        t_ref = max(all_t, key=len)
+
+        # For each classifier compute mean score across all signals (bold line)
+        clf_means = {}
+        for clf_name, clf_data in all_stress_maps.items():
+            rows = []
+            for t_c, _, scores in clf_data.values():
+                if len(t_c) > 1:
+                    rows.append(
+                        np.interp(t_ref, t_c, scores,
+                                  left=np.nan, right=np.nan)
+                    )
+            if rows:
+                clf_means[clf_name] = np.nanmean(np.array(rows), axis=0)
+
+        if not clf_means:
+            messagebox.showwarning("Save", "No data to export.")
+            return
+
+        # Write CSV: time_s + one column per classifier
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["classifier", "global_mean_stress_score",
-                             "global_mean_stress_pred"])
-            for clf_name, clf_data in all_stress_maps.items():
-                all_scores, all_preds = [], []
-                for t_c, preds, scores in clf_data.values():
-                    all_scores.extend(scores.tolist())
-                    all_preds.extend(preds.tolist())
-                if not all_scores:
-                    continue
-                writer.writerow([clf_name,
-                                 f"{float(np.nanmean(all_scores)):.6f}",
-                                 f"{float(np.nanmean(all_preds)):.6f}"])
-        messagebox.showinfo("Export", f"Saved to:\n{path}")
+            header = ["time_s"] + [f"{n}_global_mean_score"
+                                    for n in clf_means]
+            writer.writerow(header)
+            for i, t in enumerate(t_ref):
+                row = [f"{t:.4f}"]
+                for mean_arr in clf_means.values():
+                    v = mean_arr[i]
+                    row.append("" if np.isnan(v) else f"{v:.6f}")
+                writer.writerow(row)
+
+        messagebox.showinfo("Save", f"Saved to:\n{path}")
     except Exception as ex:
-        messagebox.showerror("Export error", str(ex))
+        messagebox.showerror("Save error", str(ex))
 
 
 # ── Helper: split features by phase ──────────────────────────────────────────
@@ -733,8 +763,8 @@ class AnalysisWindow(ctk.CTkFrame):
         if not self._all_stress_maps:
             return
         if messagebox.askyesno(
-            "Download CSV",
-            "Download .csv with stress probability estimates\n"
+            "Save CSV",
+            "Save .csv with global stress probability\n"
             "for the selected models?",
         ):
             _export_stress_csv(self._all_stress_maps, self)
@@ -792,7 +822,7 @@ class AnalysisWindow(ctk.CTkFrame):
 
         # ── "Gráficas generales" collapsible section in Global (always first) ──
         gen_content, g_row = self._add_collapsible_clf_section(
-            global_scroll, "Gráficas generales", g_row
+            global_scroll, "General plots", g_row
         )
         gen_content.grid_columnconfigure(0, weight=1)
         gen_inner = 0
