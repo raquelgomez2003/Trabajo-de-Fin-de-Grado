@@ -415,6 +415,13 @@ def _plot_global_stress_probability(stress_map, stress_intervals,
     title = "Combined stress probability — all signals"
     if model_name: title += f"  [{model_name}]"
     ax.set_ylim(0, 1.05)
+
+    # ── Alinear con el heatmap: mismo rango temporal y sin margenes laterales ──
+    t_arrays = [v[0] for v in stress_map.values() if len(v[0]) > 0]
+    if t_arrays:
+        t_ref_full = max(t_arrays, key=len)
+        ax.set_xlim(float(t_ref_full[0]), float(t_ref_full[-1]))
+
     ax.set_xlabel("Time (s)", fontsize=10)
     ax.set_ylabel("P(stress)", fontsize=10)
     ax.set_title(title, fontsize=11, fontweight="bold")
