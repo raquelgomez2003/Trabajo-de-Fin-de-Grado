@@ -1,12 +1,21 @@
 """
 app_window.py
 Main application window — orchestrates setup, viewer, and analysis.
+
+Cambios
+-------
+- Empatica: los tiempos de fase (calming/vexing) se leen DIRECTAMENTE del
+  fichero session_times. Se ha eliminado la alineacion por correlacion cruzada
+  (align_hr_ecg.py) y el offset ya no se calcula ni se suma.
+- Reset App: deja la app como recien arrancada conservando la sesion, restaura
+  las frecuencias originales y reconstruye los botones de sujeto.
+- Carga: las frecuencias de cada sujeto se siembran siempre desde las
+  originales del setup (self._fs_original), evitando corrupcion entre cargas.
 """
 
 from __future__ import annotations
 import os
 import sys
-import subprocess
 import customtkinter as ctk
 from tkinter import messagebox
 import matplotlib.pyplot as plt
@@ -141,12 +150,11 @@ class AppWindow(ctk.CTk):
 
     def _on_setup_confirmed(self, cfg: dict):
         self._cfg             = cfg
-        self._fs_original     = dict(cfg.get("fs", {}))  # copia intacta
+        self._fs_original     = dict(cfg.get("fs", {}))   # copia intacta
         self._signals         = {}
         self._stress_map      = {}
         self._current_subject = None
         self._rebuild_subject_buttons()
-
         self._set_status(
             f"Session ready\nDevice: {cfg['device']}\n"
             f"Subjects: {cfg['n_subjects']}\n"
@@ -171,6 +179,8 @@ class AppWindow(ctk.CTk):
 
         folder = self._cfg["folder"]
         device = self._cfg["device"]
+        # Sembrar SIEMPRE desde las fs originales del setup (evita corrupcion
+        # de frecuencias entre cargas sucesivas).
         fs_map = dict(self._fs_original) if self._fs_original else dict(self._cfg.get("fs", {}))
         base   = self._base_name()          # nombre de base dinámico (Base1, Base2, …)
 
@@ -263,7 +273,7 @@ class AppWindow(ctk.CTk):
 
         popup.wait_window()
 
-        # ── Session times + Empatica alignment ───────────────────────────────
+        # ── Session times (sin alineacion por correlacion cruzada) ───────────
         if self._cfg.get("device") == "Empatica":
             self._load_empatica_session(num)
         else:
@@ -275,13 +285,10 @@ class AppWindow(ctk.CTk):
 
     def _load_empatica_session(self, num: int) -> None:
         """
-        For Empatica sessions:
-        - If Subject*_Session_Times.csv exists inside Empatica_data:
-            load times directly (no offset needed).
-        - Otherwise:
-            compute offset via cross-correlation (align_hr_ecg.py),
-            clip all loaded signals to the ECG-matching window,
-            and fill session times from the subject-level CSV if present.
+        Sesiones Empatica: los tiempos de fase (calming/vexing) se leen
+        DIRECTAMENTE del fichero session_times. No se calcula ningun offset por
+        correlacion cruzada. Se busca primero dentro de Empatica_data y, si no
+        aparece, en la carpeta raiz del sujeto.
         """
         subject_dir  = self._subject_dir(num)
         empatica_dir = os.path.join(subject_dir, "Empatica_data")
@@ -291,84 +298,35 @@ class AppWindow(ctk.CTk):
             if os.path.isdir(alt):
                 empatica_dir = alt
 
-        # ── Check for Session_Times inside Empatica_data ──────────────────────
         session_csv = None
+
+        # 1) Buscar session_times dentro de Empatica_data
         if os.path.isdir(empatica_dir):
             for entry in os.scandir(empatica_dir):
                 if entry.is_file() and "session_times" in entry.name.lower():
                     session_csv = entry.path
                     break
 
+        # 2) Si no está ahí, buscar en la carpeta raíz del sujeto
+        if session_csv is None and os.path.isdir(subject_dir):
+            for entry in os.scandir(subject_dir):
+                if entry.is_file() and "session_times" in entry.name.lower():
+                    session_csv = entry.path
+                    break
+
         if session_csv is not None:
-            # Session times available → load directly, no offset needed
             self._fill_phase_entries_from_csv(session_csv)
-            print(f"[OK] Session times from Empatica folder: {os.path.basename(session_csv)}")
-            return
-
-        # ── No session times in Empatica folder → compute offset ─────────────
-        biopac_dir = os.path.join(subject_dir, "Biopac data")
-        ecg_path, hr_path = None, None
-
-        if os.path.isdir(biopac_dir):
-            for entry in os.scandir(biopac_dir):
-                if "ECG" in entry.name.upper() and entry.name.lower().endswith(".csv"):
-                    ecg_path = entry.path
-                    break
-
-        if os.path.isdir(empatica_dir):
-            for entry in os.scandir(empatica_dir):
-                if "HR" in entry.name.upper() and entry.name.lower().endswith(".csv"):
-                    hr_path = entry.path
-                    break
-
-        if ecg_path is None or hr_path is None:
-            print("[WARN] Cannot compute offset — ECG or HR not found")
-            # Still try to load session times from subject root
-            self._try_load_session_times(num)
-            return
-
-        # Run align_hr_ecg.py
-        script_path = os.path.normpath(os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "core", "align_hr_ecg.py"
-        ))
-
-        offset = 0
-        if os.path.exists(script_path):
-            try:
-                result = subprocess.run(
-                    [sys.executable, script_path, ecg_path, hr_path],
-                    capture_output=True, text=True, timeout=120
-                )
-                offset = int(result.stdout.strip().splitlines()[-1].strip())
-                print(f"[OK] Empatica HR offset for Subject {num}: {offset} s")
-            except Exception as e:
-                print(f"[WARN] Could not compute HR offset: {e}")
+            print(f"[OK] Session times (Empatica): {os.path.basename(session_csv)}")
+            self._set_status(
+                f"Subject {num} loaded\n{len(self._signals)} signal(s)\n"
+                f"Session times from file."
+            )
         else:
-            print(f"[WARN] align_hr_ecg.py not found at {script_path}")
-
-        # Load session times from subject root and add offset so phases align
-        self._try_load_session_times(num)
-        if offset > 0:
-            for entry_start, entry_end in [
-                (self._e_calm_s,   self._e_calm_e),
-                (self._e_stress_s, self._e_stress_e),
-            ]:
-                try:
-                    s = int(entry_start.get())
-                    e = int(entry_end.get())
-                    entry_start.delete(0, "end")
-                    entry_start.insert(0, str(s + offset))
-                    entry_end.delete(0, "end")
-                    entry_end.insert(0, str(e + offset))
-                except ValueError:
-                    pass
-
-        self._set_status(
-            f"Subject {num} loaded\n"
-            f"{len(self._signals)} signal(s)\n"
-            f"HR offset: +{offset}s"
-        )
+            print("[WARN] No session_times file found for this Empatica subject.")
+            self._set_status(
+                f"Subject {num} loaded\n{len(self._signals)} signal(s)\n"
+                f"No session_times file — enter phases manually."
+            )
 
     def _fill_phase_entries_from_csv(self, csv_path: str) -> None:
         """Fill calming/stress entries from a semicolon-separated session times CSV."""
@@ -445,23 +403,18 @@ class AppWindow(ctk.CTk):
         """
         Deja la app como recien arrancada PERO conservando la sesion ya
         configurada (carpeta, dispositivo, senales y frecuencias originales).
-        No guarda ningun dato del sujeto anterior: senales, stress, graficas,
-        intervalos de fase y resultados de analisis se borran por completo.
-        No hace falta volver a seleccionar la base de datos.
+        No guarda ningun dato del sujeto anterior. No hace falta volver a
+        seleccionar la base de datos.
         """
-        # 1. Borrar todos los datos del sujeto anterior
         self._signals         = {}
         self._stress_map      = {}
         self._current_subject = None
 
-        # 2. Restaurar las frecuencias ORIGINALES del setup.
-        #    Durante la carga, cfg["fs"] se sobrescribe con las fs tras el
-        #    remuestreo (2000 Hz). Al resetear volvemos a las originales para
-        #    que el siguiente sujeto se cargue e interprete correctamente.
+        # Restaurar las frecuencias ORIGINALES del setup
         if self._fs_original:
             self._cfg["fs"] = dict(self._fs_original)
 
-        # 3. Limpiar el visor y dejar el mensaje inicial
+        # Limpiar el visor y dejar el mensaje inicial
         self._viewer._clear()
         ctk.CTkLabel(
             self._viewer._frame_plot,
@@ -469,19 +422,18 @@ class AppWindow(ctk.CTk):
             text_color="gray", font=("Arial", 13),
         ).grid(row=0, column=0)
 
-        # 4. Limpiar la pestana de analisis (graficas, modelos, resultados)
+        # Limpiar la pestana de analisis
         self._analysis.reset_for_new_subject()
 
-        # 5. Vaciar los intervalos de fase
+        # Vaciar los intervalos de fase
         for entry in (self._e_calm_s, self._e_calm_e,
                       self._e_stress_s, self._e_stress_e):
             entry.delete(0, "end")
 
-        # 6. Reconstruir los botones de sujeto (quedan listos para recargar)
+        # Reconstruir los botones de sujeto
         if self._cfg:
             self._rebuild_subject_buttons()
 
-        # 7. Volver al visor
         self._tabs.set("Signal Viewer")
 
         if self._cfg:

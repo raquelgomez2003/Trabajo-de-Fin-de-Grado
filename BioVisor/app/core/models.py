@@ -9,13 +9,20 @@ Pipeline:
   - RandomForest classifier (fast, good enough for small datasets)
   - Physiological stress labelling with weighted majority vote
 
+Empatica-specific stress estimation
+------------------------------------
+Las senales propias de Empatica (BVP, HR, TEMP, ACC) tienen ahora su PROPIA
+extraccion de caracteristicas y su propio 'physio score', adaptados a lo que
+cada senal mide realmente. Las senales de Biopac (ECG, EDA, EMG, PPG, RESP,
+SKT) NO se han tocado: conservan exactamente el mismo codigo que antes.
+
 Public API
 ----------
-compute_rr(ecg, fs)                 → (rr_times, rr_ms)
-compute_bpm(ecg, fs, ...)           → (t_bpm, bpm_values)
-extract_features_windowed(...)      → (X, t_centers)
-build_physiological_labels(...)     → (t_centers, y)
-build_labels_from_intervals(...)    → y
+compute_rr(ecg, fs)                 -> (rr_times, rr_ms)
+compute_bpm(ecg, fs, ...)           -> (t_bpm, bpm_values)
+extract_features_windowed(...)      -> (X, t_centers)
+build_physiological_labels(...)     -> (t_centers, y)
+build_labels_from_intervals(...)    -> y
 class StressModel
 """
 
@@ -136,6 +143,108 @@ HRV_FEATURE_NAMES = [
 ]
 
 
+# ── Empatica-specific feature extractors ──────────────────────────────────────
+# Cada uno devuelve EXACTAMENTE 4 valores (los 4 "physio" slots de FEATURE_DIM).
+# Solo se usan con señales que Biopac no tiene, así que no afectan a Biopac.
+
+def _bvp_features(seg: np.ndarray, fs: float) -> np.ndarray:
+    """
+    HRV a partir de la onda de pulso BVP de Empatica (~64 Hz).
+    A diferencia del ECG (QRS), el BVP es una onda de pulso suave: se filtra en
+    banda de pulso (0.5–8 Hz) y se detectan los picos sistólicos.
+    Devuelve [BPM medio, RMSSD, LF/HF, pNN50].
+    """
+    feats = np.zeros(4, dtype=float)
+    try:
+        filt = _bandpass(seg, fs, 0.5, min(8.0, fs * 0.45))
+        s = np.std(filt)
+        if s < 1e-10:
+            return feats
+        peaks, _ = find_peaks(filt,
+                              distance=max(1, int(0.4 * fs)),  # <=150 BPM
+                              height=0.2 * s)
+        if len(peaks) < 3:
+            return feats
+        rr = np.diff(peaks) / fs * 1000.0            # ms
+        rr = rr[(rr >= 300) & (rr <= 2000)]          # 30–200 BPM
+        if len(rr) < 3:
+            return feats
+        drr = np.diff(rr)
+        feats[0] = 60000.0 / np.mean(rr)                        # BPM medio
+        feats[1] = np.sqrt(np.mean(drr ** 2))                   # RMSSD
+        feats[3] = np.sum(np.abs(drr) > 50) / max(len(drr), 1)  # pNN50
+        if len(rr) >= 8:
+            freqs = np.fft.rfftfreq(len(rr), d=np.mean(rr) / 1000.0)
+            power = np.abs(np.fft.rfft(rr - rr.mean())) ** 2
+            lf = power[(freqs >= 0.04) & (freqs < 0.15)].sum()
+            hf = power[(freqs >= 0.15) & (freqs < 0.40)].sum() + 1e-10
+            feats[2] = lf / hf                                  # LF/HF
+    except Exception:
+        pass
+    return feats
+
+
+def _hr_features(seg: np.ndarray, fs: float) -> np.ndarray:
+    """
+    Caracteristicas de la señal HR de Empatica (ya viene en BPM, ~1 Hz).
+    Devuelve [HR media, variabilidad corta (media|ΔHR|), tendencia (pendiente),
+    fraccion de tiempo por encima de la basal].
+    Mas HR, tendencia positiva y menos variabilidad -> mas estres.
+    """
+    feats = np.zeros(4, dtype=float)
+    hr = np.asarray(seg, dtype=float).ravel()
+    hr = hr[(hr > 20) & (hr < 220)]      # descartar valores imposibles
+    if len(hr) < 3:
+        if len(hr):
+            feats[0] = float(np.mean(hr))
+        return feats
+    feats[0] = float(np.mean(hr))                       # HR media
+    feats[1] = float(np.mean(np.abs(np.diff(hr))))      # variabilidad corta
+    x = np.arange(len(hr))
+    feats[2] = float(np.polyfit(x, hr, 1)[0])           # tendencia (BPM/muestra)
+    baseline = np.percentile(hr, 25)                    # nivel de reposo
+    feats[3] = float(np.mean(hr > baseline))            # fraccion elevada
+    return feats
+
+
+def _temp_features(seg: np.ndarray, fs: float) -> np.ndarray:
+    """
+    Temperatura de piel (Empatica TEMP, ~4 Hz).
+    Devuelve [temp media, deriva (fin-inicio), std, pendiente].
+    El estres produce vasoconstriccion periferica -> la temperatura BAJA
+    (deriva/pendiente negativa).
+    """
+    feats = np.zeros(4, dtype=float)
+    t = np.asarray(seg, dtype=float).ravel()
+    if len(t) < 2:
+        if len(t):
+            feats[0] = float(np.mean(t))
+        return feats
+    feats[0] = float(np.mean(t))
+    feats[1] = float(t[-1] - t[0])
+    feats[2] = float(np.std(t))
+    x = np.arange(len(t))
+    feats[3] = float(np.polyfit(x, t, 1)[0])
+    return feats
+
+
+def _acc_features(seg: np.ndarray, fs: float) -> np.ndarray:
+    """
+    Movimiento (magnitud del acelerometro Empatica, ~32 Hz).
+    Devuelve [magnitud media, std, nivel de actividad (media|Δacc|), rango].
+    Sirve sobre todo como contexto/confusor: mucho movimiento no es estres.
+    """
+    feats = np.zeros(4, dtype=float)
+    a = np.asarray(seg, dtype=float).ravel()
+    if len(a) < 2:
+        return feats
+    feats[0] = float(np.mean(a))
+    feats[1] = float(np.std(a))
+    feats[2] = float(np.mean(np.abs(np.diff(a))))
+    feats[3] = float(np.ptp(a))
+    return feats
+
+
 # ── Per-window features ───────────────────────────────────────────────────────
 
 def _window_features(segment: np.ndarray, fs: float, sig_type: str) -> np.ndarray:
@@ -156,7 +265,8 @@ def _window_features(segment: np.ndarray, fs: float, sig_type: str) -> np.ndarra
 
     extra = np.zeros(4, dtype=float)
 
-    if sig_type in ("ECG", "BVP", "PPG"):
+    # ── Biopac (SIN CAMBIOS) ──────────────────────────────────────────────────
+    if sig_type in ("ECG", "PPG"):
         hrv   = _hrv_features(seg, fs)
         extra = np.array([hrv[3], hrv[2], hrv[7], hrv[4]])  # BPM, RMSSD, LF/HF, pNN50
 
@@ -189,8 +299,21 @@ def _window_features(segment: np.ndarray, fs: float, sig_type: str) -> np.ndarra
         except Exception:
             pass
 
-    elif sig_type in ("SKT", "TEMP"):
+    elif sig_type == "SKT":
         extra[:3] = [mean, seg[-1] - seg[0], std]
+
+    # ── Empatica (NUEVO / mejorado) ───────────────────────────────────────────
+    elif sig_type == "BVP":
+        extra = _bvp_features(seg, fs)
+
+    elif sig_type == "HR":
+        extra = _hr_features(seg, fs)
+
+    elif sig_type == "TEMP":
+        extra = _temp_features(seg, fs)
+
+    elif sig_type == "ACC":
+        extra = _acc_features(seg, fs)
 
     return np.concatenate([base, extra])
 
@@ -206,12 +329,14 @@ PHYSIO_LABELS: dict[str, list[str]] = {
     "ECG":  ["Mean BPM", "RMSSD", "LF/HF ratio", "pNN50"],
     "BVP":  ["Mean BPM", "RMSSD", "LF/HF ratio", "pNN50"],
     "PPG":  ["Mean BPM", "RMSSD", "LF/HF ratio", "pNN50"],
+    "HR":   ["Mean HR", "HR var (|ΔHR|)", "HR trend", "% above baseline"],
     "RESP": ["Resp rate (brpm)", "Amplitude", "Irregularity", "—"],
     "EDA":  ["SCL mean", "SCR peaks", "SCR std", "—"],
     "GSR":  ["SCL mean", "SCR peaks", "SCR std", "—"],
     "EMG":  ["EMG RMS", "MAV deriv.", "—", "—"],
     "SKT":  ["Skin temp", "Temp trend", "Temp std", "—"],
-    "TEMP": ["Skin temp", "Temp trend", "Temp std", "—"],
+    "TEMP": ["Skin temp", "Temp drift", "Temp std", "Temp slope"],
+    "ACC":  ["Mean |acc|", "Acc std", "Activity", "Range"],
 }
 
 
@@ -283,7 +408,8 @@ def _physio_score(X: np.ndarray, sig_name: str) -> np.ndarray:
         r = a.max() - a.min()
         return (a - a.min()) / r if r > 1e-10 else np.zeros_like(a)
 
-    if sig_name in ("ECG", "BVP", "PPG"):
+    # ── Biopac (SIN CAMBIOS) ──────────────────────────────────────────────────
+    if sig_name in ("ECG", "PPG"):
         return _norm(X[:, 8]) + _norm(-X[:, 9]) + _norm(X[:, 10])
     elif sig_name == "RESP":
         return _norm(X[:, 8])
@@ -291,8 +417,22 @@ def _physio_score(X: np.ndarray, sig_name: str) -> np.ndarray:
         return _norm(X[:, 8])
     elif sig_name == "EMG":
         return _norm(X[:, 8])
-    elif sig_name in ("SKT", "TEMP"):
+    elif sig_name == "SKT":
         return _norm(-X[:, 8])
+
+    # ── Empatica (mejorado) ───────────────────────────────────────────────────
+    elif sig_name == "BVP":
+        # BPM alto + RMSSD bajo + LF/HF alto -> estres
+        return _norm(X[:, 8]) + _norm(-X[:, 9]) + _norm(X[:, 10])
+    elif sig_name == "HR":
+        # HR media alta + tendencia creciente -> estres
+        return _norm(X[:, 8]) + _norm(X[:, 10])
+    elif sig_name == "TEMP":
+        # temperatura media baja + pendiente negativa -> estres
+        return _norm(-X[:, 8]) + _norm(-X[:, 11])
+    elif sig_name == "ACC":
+        # movimiento: señal debil, solo como apoyo
+        return _norm(X[:, 8])
     else:
         return _norm(X[:, 2])
 
@@ -308,8 +448,9 @@ def build_physiological_labels(
     ECG/cardiac signals vote twice. Upper tertile = stress.
     Returns (t_centers, y_stress).
     """
-    WEIGHTS = {"ECG": 2, "BVP": 2, "PPG": 2,
-               "EDA": 1, "GSR": 1, "RESP": 1, "EMG": 1, "SKT": 1, "TEMP": 1}
+    WEIGHTS = {"ECG": 2, "BVP": 2, "PPG": 2, "HR": 2,
+               "EDA": 1, "GSR": 1, "RESP": 1, "EMG": 1,
+               "SKT": 1, "TEMP": 1, "ACC": 0}
 
     all_votes: list[np.ndarray] = []
     all_weights: list[int]      = []
@@ -339,7 +480,8 @@ def build_physiological_labels(
 
     # Weighted sum across signals — majority = stress
     weighted_sum   = sum(v[:n_win] * w for v, w in zip(all_votes, all_weights))
-    total_weight   = sum(all_weights)
+    total_weight   = sum(all_weights) if sum(all_weights) > 0 else 1
+
     y_out          = (weighted_sum > total_weight / 2).astype(int)
 
     return common_t, y_out
