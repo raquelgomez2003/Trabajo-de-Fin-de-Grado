@@ -59,50 +59,48 @@ def _load_empatica_csv(
     fs_map: dict[str, float],
 ) -> np.ndarray | None:
     """
-    Empatica E4 format:
-      Row 0: Unix timestamp(s)
-      Row 1: sample rate(s) in Hz   <- se IGNORA a proposito
-      Row 2+: data
-    ACC has 3 columns -> returns magnitude.
+    Empatica combinado (formato SujetoN_*.csv):
+      - BVP / EDA / HR / TEMP: un valor por linea, SIN cabecera ni metadatos.
+      - ACC: cabecera 'ACC_X,ACC_Y,ACC_Z,start_time_unix,sampling_rate' +
+        filas de datos -> se devuelve la magnitud sqrt(x^2 + y^2 + z^2).
 
-    IMPORTANTE
-    ----------
-    La frecuencia de muestreo NO se lee del fichero. Se usa el valor que el
-    usuario indica en el popup de carga (fs_map[sig_type], sembrado desde la
-    config del SetupWindow). Con esa fs se remuestrea la senal a 2000 Hz
-    conservando su duracion real. Tras el remuestreo, fs_map[sig_type] pasa
-    a 2000 Hz.
+    La fs se toma del popup/config (fs_map[sig_type]) y la senal se MANTIENE a
+    su frecuencia nativa (BVP 64, EDA 4, HR 1, TEMP 4, ACC 32 Hz). NO se
+    remuestrea a 2000 Hz: para Empatica eso solo multiplica el tamano y destroza
+    las features de las senales lentas.
     """
     filename = os.path.basename(path)
     try:
         with open(path, "r") as f:
             lines = f.readlines()
-
-        if len(lines) < 3:
+        if not lines:
             return None
 
-        # -- Frecuencia de muestreo tomada del POPUP (no del fichero) ----------
         fs_orig = fs_map.get(sig_type)
         if fs_orig is None or fs_orig <= 0:
             print(f"[WARN] Empatica {filename}: no hay fs para '{sig_type}' "
                   f"en el popup de carga; se omite esta senal.")
             return None
 
-        # -- Datos: desde la fila 2 en adelante --------------------------------
+        # Saltar una cabecera de texto si la hay (p. ej. ACC_X,ACC_Y,...)
+        start = 0
+        first = lines[0].strip()
+        if first and any(c.isalpha() for c in first):
+            start = 1
+
         rows = []
-        for line in lines[2:]:
+        for line in lines[start:]:
             vals = line.strip().split(",")
             try:
                 rows.append([float(v) for v in vals if v.strip()])
             except ValueError:
                 continue
-
         if not rows:
             return None
 
         arr = np.array(rows)
 
-        # ACC: 3 columnas -> magnitud sqrt(x^2 + y^2 + z^2)
+        # ACC: >=3 columnas -> magnitud con las 3 primeras (x, y, z)
         if arr.ndim == 2 and arr.shape[1] >= 3:
             signal = np.sqrt(arr[:, 0] ** 2 + arr[:, 1] ** 2 + arr[:, 2] ** 2)
         elif arr.ndim == 2:
@@ -116,11 +114,9 @@ def _load_empatica_csv(
 
         dur = signal.size / fs_orig
         print(f"[EMPATICA] {sig_type:5s}: {signal.size} muestras @ {fs_orig} Hz "
-              f"(popup) -> duracion {dur:.1f}s -> remuestreo a 2000 Hz")
+              f"(nativa) -> duracion {dur:.1f}s (sin remuestreo)")
 
-        # -- Remuestreo a 2000 Hz usando la fs del popup -----------------------
-        signal = _resample_to_target(signal, fs_orig=fs_orig, fs_target=2000.0)
-        fs_map[sig_type] = 2000.0   # tras remuestrear, todas las senales van a 2000 Hz
+        fs_map[sig_type] = float(fs_orig)   # se mantiene la fs nativa
         return signal.astype(float)
 
     except Exception as e:
