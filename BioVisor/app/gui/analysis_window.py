@@ -39,12 +39,17 @@ STRESS_CMAP = LinearSegmentedColormap.from_list(
     N=256,
 )
 
+# ── Layout compartido para las graficas globales ──────────────────────────────
+# La grafica de probabilidad, el heatmap y la barra de fases usan EXACTAMENTE
+# el mismo margen izquierdo (_LEFT) y el mismo borde derecho (_RIGHT), de modo
+# que quedan perfectamente alineados en el eje de tiempo. La colorbar se coloca
+# justo a la derecha (_CBAR_LEFT), sin dejar margen blanco.
 _FIG_W     = 12.0
 _FIG_H     = 3.5
 _LEFT      = 0.07
-_RIGHT     = 0.87
-_CBAR_LEFT = 0.88
-_CBAR_W    = 0.02
+_RIGHT     = 0.90     # borde derecho del area de dibujo (prob + heatmap + fases)
+_CBAR_LEFT = 0.915    # colorbar pegada a la derecha del heatmap
+_CBAR_W    = 0.018
 
 # ── Available classifiers ─────────────────────────────────────────────────────
 
@@ -394,6 +399,7 @@ def _plot_resp_rate(resp, fs, stress_intervals, calming_intervals):
 def _plot_global_stress_probability(stress_map, stress_intervals,
                                      calming_intervals, model_name=""):
     fig = plt.figure(figsize=(_FIG_W, _FIG_H))
+    # Mismo area de dibujo que el heatmap: [_LEFT, _RIGHT]
     ax  = fig.add_axes([_LEFT, 0.18, _RIGHT - _LEFT, 0.72])
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(stress_map), 1)))
     all_scores = []
@@ -416,16 +422,24 @@ def _plot_global_stress_probability(stress_map, stress_intervals,
     if model_name: title += f"  [{model_name}]"
     ax.set_ylim(0, 1.05)
 
-    # ── Alinear con el heatmap: mismo rango temporal y sin margenes laterales ──
+    # ── Mismo rango temporal que el heatmap (hasta el final REAL del registro) ─
     t_arrays = [v[0] for v in stress_map.values() if len(v[0]) > 0]
     if t_arrays:
         t_ref_full = max(t_arrays, key=len)
-        ax.set_xlim(float(t_ref_full[0]), float(t_ref_full[-1]))
+        t0    = float(t_ref_full[0])
+        t_end = float(t_ref_full[-1])
+        if len(t_ref_full) > 1:
+            # el ultimo valor es el CENTRO de la ultima ventana: se anade
+            # media ventana para llegar al final real del registro
+            t_end += float(t_ref_full[-1] - t_ref_full[-2]) / 2.0
+        ax.set_xlim(t0, t_end)
 
     ax.set_xlabel("Time (s)", fontsize=10)
     ax.set_ylabel("P(stress)", fontsize=10)
     ax.set_title(title, fontsize=11, fontweight="bold")
-    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1),
+    # Leyenda en el margen derecho (misma zona que la colorbar del heatmap),
+    # de modo que el area de dibujo mantiene el mismo ancho [_LEFT, _RIGHT].
+    ax.legend(fontsize=7, loc="upper left", bbox_to_anchor=(1.005, 1.0),
               borderaxespad=0, framealpha=0.75)
     ax.grid(True, alpha=0.25)
     return fig
@@ -442,56 +456,42 @@ def _plot_global_heatmap_mean(stress_map, stress_intervals,
         ax.text(0.5, 0.5, "No results.", ha="center", va="center")
         return fig
 
-    # Reference time axis (the signal with the most windows)
     t_ref = max((stress_map[s][0] for s in sig_names), key=len)
-    t_min = t_ref[0]
-    t_max = t_ref[-1]
+    t_min = float(t_ref[0])
+    # El ultimo t es el CENTRO de la ultima ventana; se anade media ventana
+    # para que la representacion llegue al final real del registro (sin margen).
+    t_max = float(t_ref[-1])
+    if len(t_ref) > 1:
+        t_max += float(t_ref[-1] - t_ref[-2]) / 2.0
 
-    # Interpolate probabilities of all signals onto the reference axis
     rows = []
     for s in sig_names:
         t, _, scores = stress_map[s]
         if len(t) < 2:
             continue
-        interp_scores = np.interp(
-            t_ref, t, scores, left=np.nan, right=np.nan,
-        )
-        rows.append(interp_scores)
-
+        rows.append(np.interp(t_ref, t, scores, left=np.nan, right=np.nan))
     rows = np.array(rows)
 
-    # Mean across signals
     mean_prob = np.nanmean(rows, axis=0)
-
-    # Replace NaN by the overall mean
     mean_prob = np.nan_to_num(mean_prob, nan=np.nanmean(mean_prob))
 
-    # ===============================
-    # ENVELOPE (Hilbert + smoothing)
-    # ===============================
     analytic_signal = scipy.signal.hilbert(mean_prob)
     envelope = np.abs(analytic_signal)
 
-    # Smooth the envelope
     window = min(21, len(envelope))
     if window % 2 == 0:
         window -= 1
     if window >= 5:
-        envelope = scipy.signal.savgol_filter(
-            envelope, window_length=window, polyorder=3)
+        envelope = scipy.signal.savgol_filter(envelope, window_length=window, polyorder=3)
 
-    # ===============================
-    # NORMALIZATION [0, 1]
-    # ===============================
-    envelope = (envelope - np.min(envelope)) / (
-        np.max(envelope) - np.min(envelope) + 1e-12)
+    envelope = (envelope - np.min(envelope)) / (np.max(envelope) - np.min(envelope) + 1e-12)
 
-    # ===============================
-    # FIGURE
-    # ===============================
+    # ── Layout: mismo area [_LEFT, _RIGHT] que la grafica de probabilidad ──────
+    HM_W = _RIGHT - _LEFT
+
     fig      = plt.figure(figsize=(_FIG_W, _FIG_H))
-    ax_heat  = fig.add_axes([_LEFT, 0.32, _RIGHT - _LEFT, 0.52])
-    ax_phase = fig.add_axes([_LEFT, 0.10, _RIGHT - _LEFT, 0.18])
+    ax_heat  = fig.add_axes([_LEFT, 0.32, HM_W, 0.52])
+    ax_phase = fig.add_axes([_LEFT, 0.10, HM_W, 0.18])
     ax_cbar  = fig.add_axes([_CBAR_LEFT, 0.32, _CBAR_W, 0.52])
 
     im = ax_heat.imshow(
@@ -513,7 +513,6 @@ def _plot_global_heatmap_mean(stress_map, stress_intervals,
         title += f"  [{model_name}]"
     ax_heat.set_title(title, fontsize=11, fontweight="bold", pad=5)
 
-    # Phase boundary lines
     for s, e in calming_intervals:
         ax_heat.axvline(s, color="#00aa44", lw=1.0, ls="--", alpha=0.7)
         ax_heat.axvline(e, color="#00aa44", lw=1.0, ls="--", alpha=0.7)
@@ -526,7 +525,6 @@ def _plot_global_heatmap_mean(stress_map, stress_intervals,
     cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
     cbar.ax.tick_params(labelsize=7)
 
-    # Bottom phase bar
     ax_phase.set_xlim(t_min, t_max)
     ax_phase.set_ylim(0, 1)
     ax_phase.set_yticks([])
