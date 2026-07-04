@@ -116,6 +116,23 @@ class AppWindow(ctk.CTk):
         e2.pack(side="left", padx=2)
         return e1, e2
 
+    # ── Folder helpers ─────────────────────────────────────────────────────────
+
+    def _base_name(self) -> str:
+        """
+        Nombre de la base derivado de la carpeta seleccionada en el setup.
+        Si seleccionas '...\\Base2' -> 'Base2', si seleccionas '...\\Base1' -> 'Base1'.
+        Así las rutas de sujeto se construyen como '{base}_Sujeto{num}' para
+        cualquier base, sin quedar fijadas a 'Base1'.
+        """
+        folder = self._cfg.get("folder", "")
+        return os.path.basename(os.path.normpath(folder)) if folder else ""
+
+    def _subject_dir(self, num: int) -> str:
+        """Carpeta raíz del sujeto: '{folder}\\{base}_Sujeto{num}'."""
+        folder = self._cfg.get("folder", "")
+        return os.path.join(folder, f"{self._base_name()}_Sujeto{num}")
+
     # ── Setup ─────────────────────────────────────────────────────────────────
 
     def _open_setup(self):
@@ -152,6 +169,7 @@ class AppWindow(ctk.CTk):
         folder = self._cfg["folder"]
         device = self._cfg["device"]
         fs_map = dict(self._cfg.get("fs", {}))
+        base   = self._base_name()          # nombre de base dinámico (Base1, Base2, …)
 
         popup = ctk.CTkToplevel(self)
         popup.title(f"Loading Subject {num}")
@@ -185,17 +203,20 @@ class AppWindow(ctk.CTk):
 
         if device == "Biopac":
             candidates = [
-                os.path.join(folder, f"Base1_Sujeto{num}", "Biopac data"),
-                os.path.join(folder, f"Base1_Sujeto{num}"),
+                os.path.join(folder, f"{base}_Sujeto{num}", "Biopac data"),
+                os.path.join(folder, f"{base}_Sujeto{num}"),
                 os.path.join(folder, f"Subject{num}"),
                 os.path.join(folder, f"S{num:02d}"),
                 folder,
             ]
         else:  # Empatica
+            # Se apunta DIRECTAMENTE a la subcarpeta Empatica, para que los
+            # ficheros crudos Left_/Right_ que hay en la carpeta del sujeto
+            # NO tapen a tus Sujeto{num}_*.csv combinados.
             candidates = [
-                os.path.join(folder, f"Base1_Sujeto{num}", "Empatica_data"),
-                os.path.join(folder, f"Base1_Sujeto{num}", "Empatica data"),
-                os.path.join(folder, f"Base1_Sujeto{num}", "Empatica"),
+                os.path.join(folder, f"{base}_Sujeto{num}", "Empatica_data"),
+                os.path.join(folder, f"{base}_Sujeto{num}", "Empatica data"),
+                os.path.join(folder, f"{base}_Sujeto{num}", "Empatica"),
                 os.path.join(folder, f"Subject{num}"),
                 os.path.join(folder, f"S{num:02d}"),
                 folder,
@@ -259,9 +280,13 @@ class AppWindow(ctk.CTk):
             clip all loaded signals to the ECG-matching window,
             and fill session times from the subject-level CSV if present.
         """
-        folder       = self._cfg.get("folder", "")
-        subject_dir  = os.path.join(folder, f"Base1_Sujeto{num}")
+        subject_dir  = self._subject_dir(num)
         empatica_dir = os.path.join(subject_dir, "Empatica_data")
+        # Acepta también la variante con espacio ('Empatica data')
+        if not os.path.isdir(empatica_dir):
+            alt = os.path.join(subject_dir, "Empatica data")
+            if os.path.isdir(alt):
+                empatica_dir = alt
 
         # ── Check for Session_Times inside Empatica_data ──────────────────────
         session_csv = None
@@ -369,8 +394,7 @@ class AppWindow(ctk.CTk):
 
     def _try_load_session_times(self, num: int) -> None:
         """Load session times from subject root folder (Biopac case)."""
-        folder      = self._cfg.get("folder", "")
-        subject_dir = os.path.join(folder, f"Base1_Sujeto{num}")
+        subject_dir = self._subject_dir(num)
         if not os.path.isdir(subject_dir):
             return
         for entry in os.scandir(subject_dir):
