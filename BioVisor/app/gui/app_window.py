@@ -37,6 +37,7 @@ class AppWindow(ctk.CTk):
         self._signals:         dict       = {}
         self._stress_map:      dict       = {}
         self._current_subject: int | None = None
+        self._fs_original:     dict       = {}   # fs del setup, NUNCA se muta
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -140,10 +141,12 @@ class AppWindow(ctk.CTk):
 
     def _on_setup_confirmed(self, cfg: dict):
         self._cfg             = cfg
+        self._fs_original     = dict(cfg.get("fs", {}))  # copia intacta
         self._signals         = {}
         self._stress_map      = {}
         self._current_subject = None
         self._rebuild_subject_buttons()
+
         self._set_status(
             f"Session ready\nDevice: {cfg['device']}\n"
             f"Subjects: {cfg['n_subjects']}\n"
@@ -168,7 +171,7 @@ class AppWindow(ctk.CTk):
 
         folder = self._cfg["folder"]
         device = self._cfg["device"]
-        fs_map = dict(self._cfg.get("fs", {}))
+        fs_map = dict(self._fs_original) if self._fs_original else dict(self._cfg.get("fs", {}))
         base   = self._base_name()          # nombre de base dinámico (Base1, Base2, …)
 
         popup = ctk.CTkToplevel(self)
@@ -439,10 +442,26 @@ class AppWindow(ctk.CTk):
     # ── Reset App ─────────────────────────────────────────────────────────────
 
     def _reset_app(self):
+        """
+        Deja la app como recien arrancada PERO conservando la sesion ya
+        configurada (carpeta, dispositivo, senales y frecuencias originales).
+        No guarda ningun dato del sujeto anterior: senales, stress, graficas,
+        intervalos de fase y resultados de analisis se borran por completo.
+        No hace falta volver a seleccionar la base de datos.
+        """
+        # 1. Borrar todos los datos del sujeto anterior
         self._signals         = {}
         self._stress_map      = {}
         self._current_subject = None
 
+        # 2. Restaurar las frecuencias ORIGINALES del setup.
+        #    Durante la carga, cfg["fs"] se sobrescribe con las fs tras el
+        #    remuestreo (2000 Hz). Al resetear volvemos a las originales para
+        #    que el siguiente sujeto se cargue e interprete correctamente.
+        if self._fs_original:
+            self._cfg["fs"] = dict(self._fs_original)
+
+        # 3. Limpiar el visor y dejar el mensaje inicial
         self._viewer._clear()
         ctk.CTkLabel(
             self._viewer._frame_plot,
@@ -450,17 +469,25 @@ class AppWindow(ctk.CTk):
             text_color="gray", font=("Arial", 13),
         ).grid(row=0, column=0)
 
+        # 4. Limpiar la pestana de analisis (graficas, modelos, resultados)
         self._analysis.reset_for_new_subject()
 
+        # 5. Vaciar los intervalos de fase
         for entry in (self._e_calm_s, self._e_calm_e,
                       self._e_stress_s, self._e_stress_e):
             entry.delete(0, "end")
 
+        # 6. Reconstruir los botones de sujeto (quedan listos para recargar)
+        if self._cfg:
+            self._rebuild_subject_buttons()
+
+        # 7. Volver al visor
         self._tabs.set("Signal Viewer")
 
         if self._cfg:
             self._set_status(
                 f"App reset.\nSession: {self._cfg.get('device', '')}\n"
+                f"Subjects: {self._cfg.get('n_subjects', 0)}\n"
                 f"Select a subject to continue."
             )
         else:
