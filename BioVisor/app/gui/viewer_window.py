@@ -6,9 +6,10 @@ predicted-stress markers, and ECG BPM overlay.
 Zoom behaviour
 --------------
 All subplots share the x-axis (sharex=True in plotter).
-When the user zooms or pans, the y-limits of every axes are
-automatically adjusted so the visible signal fills the full
-panel height (no empty space above/below).
+Al cargar, y cada vez que el usuario hace zoom o desplaza, los limites
+verticales de cada panel se reajustan al minimo/maximo de la parte visible
+de la senal, de modo que el trazo ocupa toda la altura del panel (sin
+hueco arriba ni abajo).
 """
 
 from __future__ import annotations
@@ -25,6 +26,10 @@ from app.core.plotter import plot_signals_with_stress
 
 class ViewerWindow(ctk.CTkFrame):
 
+    # Margen vertical alrededor de la senal (fraccion del rango).
+    # Cuanto menor, mas "ampliada en altura" se ve la senal.
+    _Y_MARGIN = 0.02
+
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         self._canvas:  FigureCanvasTkAgg | None  = None
@@ -32,6 +37,7 @@ class ViewerWindow(ctk.CTkFrame):
         self._fig:     plt.Figure | None          = None
         self._axs:     list[plt.Axes]             = []
         self._cids:    list[int]                  = []
+        self._ax_data: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
         self._build()
 
     # ── Layout ────────────────────────────────────────────────────────────────
@@ -80,6 +86,7 @@ class ViewerWindow(ctk.CTkFrame):
         )
 
         self._axs = self._fig.get_axes()
+        self._precompute_ax_data()
         self._connect_zoom_callbacks()
 
         self._canvas = FigureCanvasTkAgg(
@@ -96,24 +103,18 @@ class ViewerWindow(ctk.CTkFrame):
         self._toolbar.update()
         self._toolbar.pack(side="left")
 
+        # Ajuste inicial de altura: cada senal llena su panel al cargar
+        self._autofit_all()
+
     def reset_view(self):
         if self._toolbar:
             self._toolbar.home()
 
     # ── Zoom / auto-ylim ──────────────────────────────────────────────────────
 
-    def _connect_zoom_callbacks(self):
-        """
-        For each axes, listen to xlim_changed.
-        When x-range changes, refit the y-limits of that axes to the
-        data that is currently visible — so the signal always fills
-        the full panel height with no empty space.
-        """
-        if not self._axs:
-            return
-
-        # Pre-compute (t, y) arrays per axes so the callback is fast
-        ax_data: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
+    def _precompute_ax_data(self):
+        """Guarda las parejas (t, y) de cada eje para que el ajuste sea rapido."""
+        self._ax_data = {}
         for ax in self._axs:
             pairs = []
             for line in ax.get_lines():
@@ -121,38 +122,61 @@ class ViewerWindow(ctk.CTkFrame):
                 yd = np.asarray(line.get_ydata(), dtype=float)
                 if len(xd) and len(yd) and len(xd) == len(yd):
                     pairs.append((xd, yd))
-            ax_data[id(ax)] = pairs
+            self._ax_data[id(ax)] = pairs
 
-        def _on_xlim_changed(ax):
-            x0, x1 = ax.get_xlim()
-            pairs   = ax_data.get(id(ax), [])
-            if not pairs:
-                return
+    def _fit_ax(self, ax):
+        """Reajusta los limites Y de 'ax' a la parte visible de la senal."""
+        pairs = self._ax_data.get(id(ax), [])
+        if not pairs:
+            return
 
-            # Collect all y values inside the current x window
-            y_visible = []
-            for xd, yd in pairs:
-                mask = (xd >= x0) & (xd <= x1)
-                if mask.any():
-                    y_visible.append(yd[mask])
+        x0, x1 = ax.get_xlim()
 
-            if not y_visible:
-                return
+        # Recoger todos los valores Y dentro de la ventana X actual
+        y_visible = []
+        for xd, yd in pairs:
+            mask = (xd >= x0) & (xd <= x1)
+            if mask.any():
+                y_visible.append(yd[mask])
 
-            y_all = np.concatenate(y_visible)
-            y_all = y_all[np.isfinite(y_all)]
-            if len(y_all) == 0:
-                return
+        if not y_visible:
+            return
 
-            y_lo = float(np.nanmin(y_all))
-            y_hi = float(np.nanmax(y_all))
-            margin = (y_hi - y_lo) * 0.08 if y_hi != y_lo else 0.5
+        y_all = np.concatenate(y_visible)
+        y_all = y_all[np.isfinite(y_all)]
+        if len(y_all) == 0:
+            return
 
-            ax.set_ylim(y_lo - margin, y_hi + margin)
+        y_lo = float(np.nanmin(y_all))
+        y_hi = float(np.nanmax(y_all))
+        margin = (y_hi - y_lo) * self._Y_MARGIN if y_hi != y_lo else 0.5
+
+        ax.set_ylim(y_lo - margin, y_hi + margin)
+
+    def _autofit_all(self):
+        """Ajusta la altura de todos los paneles y redibuja (usado al cargar)."""
+        if not self._axs:
+            return
+        for ax in self._axs:
+            self._fit_ax(ax)
+        if self._canvas:
             self._canvas.draw_idle()
 
-        # Connect to every axes individually (sharex means x is already
-        # synchronised; we handle y per-panel)
+    def _connect_zoom_callbacks(self):
+        """
+        For each axes, listen to xlim_changed.
+        Cuando cambia el rango X (zoom/pan), reajusta los limites Y de ese
+        eje a los datos visibles, para que la senal siempre llene el panel.
+        """
+        if not self._axs:
+            return
+
+        def _on_xlim_changed(ax):
+            self._fit_ax(ax)
+            if self._canvas:
+                self._canvas.draw_idle()
+
+        # sharex sincroniza X; la Y se gestiona por panel
         for ax in self._axs:
             cid = ax.callbacks.connect("xlim_changed", _on_xlim_changed)
             self._cids.append(cid)
@@ -168,6 +192,7 @@ class ViewerWindow(ctk.CTkFrame):
                 pass
         self._cids = []
         self._axs  = []
+        self._ax_data = {}
 
         if self._canvas:
             self._canvas.get_tk_widget().destroy()
