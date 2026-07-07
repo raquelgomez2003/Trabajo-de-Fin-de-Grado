@@ -126,6 +126,42 @@ def _fit_predict(clf, X_train, y_train, X_all):
     return preds, scores
 
 
+def _make_pipeline(clf_name: str):
+    """Tuberia: imputacion (mediana) + estandarizacion + clasificador."""
+    from sklearn.pipeline import Pipeline
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import StandardScaler
+    return Pipeline([
+        ("imp", SimpleImputer(strategy="median")),
+        ("scl", StandardScaler()),
+        ("clf", _build_classifier(clf_name)),
+    ])
+
+
+def _oof_scores(clf_name: str, X, y):
+    """
+    Probabilidad de estres out-of-fold (validacion cruzada estratificada).
+    Cada ventana se evalua con un modelo que NO la ha visto durante su
+    entrenamiento, evitando la fuga de datos. Devuelve None si no hay dos
+    clases o si la clase minoritaria tiene menos de 2 muestras.
+    """
+    import warnings
+    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=int)
+    if len(np.unique(y)) < 2:
+        return None
+    n_min = int(np.bincount(y).min())
+    if n_min < 2:
+        return None
+    skf = StratifiedKFold(n_splits=min(5, n_min), shuffle=True, random_state=42)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        proba = cross_val_predict(_make_pipeline(clf_name), X, y,
+                                  cv=skf, method="predict_proba")
+    return proba[:, 1]
+
+
 # ── CSV export ────────────────────────────────────────────────────────────────
 
 def _export_stress_csv(all_stress_maps, parent_widget):
@@ -852,8 +888,23 @@ class AnalysisWindow(ctk.CTkFrame):
         self.update_idletasks()
 
         signals = {s: self._signals[s] for s in selected_sigs if s in self._signals}
-        t_phys, y_phys = build_physiological_labels(
-            signals, self._fs_map, window_sec, step_sec)
+
+        # ── Etiquetado del entrenamiento ──────────────────────────────────────
+        # Modo PRINCIPAL: se entrena con las etiquetas del PROTOCOLO experimental
+        #   (vexing = estres = 1 ; calming/reposo dentro del protocolo = 0).
+        #   Las ventanas fuera de la ventana temporal del protocolo se descartan.
+        # Modo RESPALDO: solo si NO hay intervalos de protocolo, se recurre a las
+        #   etiquetas fisiologicas aproximadas (votacion ponderada). En ese caso
+        #   la ROC es unicamente orientativa.
+        prot_intervals = list(self._stress_intervals) + list(self._calming_intervals)
+        has_protocol   = len(prot_intervals) > 0
+        if has_protocol:
+            t_prot_lo = min(s for s, _ in prot_intervals)
+            t_prot_hi = max(e for _, e in prot_intervals)
+            y_phys    = np.array([], dtype=int)
+        else:
+            _, y_phys = build_physiological_labels(
+                signals, self._fs_map, window_sec, step_sec)
 
         for w in list(self._results_frame.winfo_children()):
             try:
@@ -934,24 +985,48 @@ class AnalysisWindow(ctk.CTkFrame):
                 X_all, t_centers = extract_features_windowed(
                     signals[sig_name], fs, sig_name, window_sec, step_sec)
                 if len(X_all) == 0: continue
-                n_win = min(len(X_all), len(t_phys))
-                if n_win == 0: continue
-                X_train = X_all[:n_win]
-                y_train = y_phys[:n_win]
-                if len(np.unique(y_train)) < 2: continue
+
+                # ── Construccion de las etiquetas de entrenamiento ─────────────
+                if has_protocol:
+                    # Etiquetas del PROTOCOLO: vexing = 1 ; resto = 0
+                    y_all      = build_labels_from_intervals(
+                                     t_centers, self._stress_intervals).astype(int)
+                    # Solo se entrena con ventanas dentro de la ventana temporal
+                    # del protocolo (calming U vexing); el resto se descarta.
+                    train_mask = (t_centers >= t_prot_lo) & (t_centers <= t_prot_hi)
+                else:
+                    # RESPALDO: etiquetas fisiologicas aproximadas
+                    n_win = min(len(X_all), len(y_phys))
+                    if n_win == 0: continue
+                    y_all             = np.zeros(len(t_centers), dtype=int)
+                    y_all[:n_win]     = y_phys[:n_win]
+                    train_mask        = np.zeros(len(t_centers), dtype=bool)
+                    train_mask[:n_win] = True
+
+                X_train = X_all[train_mask]
+                y_train = y_all[train_mask]
+                if len(y_train) == 0 or len(np.unique(y_train)) < 2:
+                    continue
+
                 try:
                     clf = _build_classifier(clf_name)
+                    # Ajuste sobre las ventanas etiquetadas -> probabilidad en
+                    # TODO el registro (para la linea temporal y el heatmap).
                     preds, scores = _fit_predict(clf, X_train, y_train, X_all)
                 except Exception as ex:
                     self._set_status(f"{clf_name} failed: {ex}"); continue
+
+                # Puntuaciones out-of-fold (validacion cruzada) para la ROC:
+                # cada ventana se evalua con un modelo que no la ha visto.
+                roc_scores = _oof_scores(clf_name, X_train, y_train)
 
                 stress_map[sig_name] = (t_centers, preds, scores)
                 per_sig[sig_name] = {
                     "t_centers":   t_centers,
                     "preds":       preds,
                     "scores":      scores,
-                    "y_session":   build_labels_from_intervals(
-                                       t_centers, self._stress_intervals),
+                    "roc_y":       y_train,        # etiquetas del protocolo (subset)
+                    "roc_scores":  roc_scores,     # probabilidad OOF (subset)
                     "phase_feats": _split_by_phase(
                                        X_all, t_centers,
                                        self._calming_intervals,
@@ -984,9 +1059,13 @@ class AnalysisWindow(ctk.CTkFrame):
                     inner_row += 1
 
                 if "roc" in selected_plots:
-                    fig = plot_roc(res["y_session"], scores, sig_name)
-                    self._add_plot_in(content, f"ROC curve — {clf_name}", fig, inner_row)
-                    inner_row += 1
+                    # ROC honesta: predicciones out-of-fold frente a las
+                    # etiquetas del protocolo. Si no hay datos suficientes para
+                    # la validacion cruzada (roc_scores None), se omite.
+                    if res["roc_scores"] is not None:
+                        fig = plot_roc(res["roc_y"], res["roc_scores"], sig_name)
+                        self._add_plot_in(content, f"ROC curve — {clf_name}", fig, inner_row)
+                        inner_row += 1
 
                 if "timeline" in selected_plots:
                     fig = _plot_stress_timeline(t_centers, preds, scores, sig_name,
