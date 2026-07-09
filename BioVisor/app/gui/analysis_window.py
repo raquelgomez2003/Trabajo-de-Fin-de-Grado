@@ -138,15 +138,19 @@ def _make_pipeline(clf_name: str):
     ])
 
 
-def _oof_scores(clf_name: str, X, y):
+def _oof_scores(clf_name, X, y, t_centers=None,
+                window_sec=60.0, step_sec=30.0):
     """
-    Probabilidad de estres out-of-fold (validacion cruzada estratificada).
-    Cada ventana se evalua con un modelo que NO la ha visto durante su
-    entrenamiento, evitando la fuga de datos. Devuelve None si no hay dos
-    clases o si la clase minoritaria tiene menos de 2 muestras.
+    Probabilidad de estres out-of-fold SIN fuga por solapamiento de ventanas.
+    Las ventanas contiguas (que comparten senal por el solape) se agrupan en
+    bloques temporales y se reparten con StratifiedGroupKFold, de modo que una
+    ventana y su vecina solapada nunca caen en folds distintos. Ademas se purgan
+    del train las ventanas cuyo centro dista menos de una ventana del test.
+    Devuelve probabilidades alineadas con `y` (puede haber NaN), o None.
     """
     import warnings
-    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+    import numpy as np
+
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=int)
     if len(np.unique(y)) < 2:
@@ -154,13 +158,59 @@ def _oof_scores(clf_name: str, X, y):
     n_min = int(np.bincount(y).min())
     if n_min < 2:
         return None
-    skf = StratifiedKFold(n_splits=min(5, n_min), shuffle=True, random_state=42)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        proba = cross_val_predict(_make_pipeline(clf_name), X, y,
-                                  cv=skf, method="predict_proba")
-    return proba[:, 1]
+    n_splits = min(5, n_min)
+    n = len(y)
 
+    # Sin tiempos no se puede bloquear: respaldo estratificado simple.
+    if t_centers is None:
+        from sklearn.model_selection import StratifiedKFold, cross_val_predict
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            proba = cross_val_predict(_make_pipeline(clf_name), X, y,
+                                      cv=skf, method="predict_proba")
+        return proba[:, 1]
+
+    t = np.asarray(t_centers, dtype=float)
+
+    # Bloques temporales contiguos (~3 por fold, para que cada fold mezcle clases).
+    order    = np.argsort(t)
+    n_blocks = max(n_splits * 3, n_splits)
+    blk_len  = max(1, int(np.ceil(n / n_blocks)))
+    groups   = np.empty(n, dtype=int)
+    for rank, idx in enumerate(order):
+        groups[idx] = rank // blk_len
+
+    n_groups = len(np.unique(groups))
+    if n_groups < 2:
+        return None
+    n_splits = min(n_splits, n_groups)
+
+    try:
+        from sklearn.model_selection import StratifiedGroupKFold
+        splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True,
+                                        random_state=42)
+        splits = list(splitter.split(X, y, groups))
+    except Exception:
+        from sklearn.model_selection import GroupKFold
+        splits = list(GroupKFold(n_splits=n_splits).split(X, y, groups))
+
+    proba = np.full(n, np.nan, dtype=float)
+    for tr_idx, te_idx in splits:
+        te_t = t[te_idx]
+        # Purga: quita del train ventanas que solapan temporalmente con el test.
+        if len(te_t):
+            d = np.abs(t[tr_idx][:, None] - te_t[None, :]).min(axis=1)
+            tr_idx = tr_idx[d >= window_sec]
+        if len(tr_idx) == 0 or len(np.unique(y[tr_idx])) < 2:
+            continue
+        pipe = _make_pipeline(clf_name)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            pipe.fit(X[tr_idx], y[tr_idx])
+            proba[te_idx] = pipe.predict_proba(X[te_idx])[:, 1]
+
+    return None if np.isnan(proba).all() else proba
 
 # ── CSV export ────────────────────────────────────────────────────────────────
 
@@ -1018,7 +1068,8 @@ class AnalysisWindow(ctk.CTkFrame):
 
                 # Puntuaciones out-of-fold (validacion cruzada) para la ROC:
                 # cada ventana se evalua con un modelo que no la ha visto.
-                roc_scores = _oof_scores(clf_name, X_train, y_train)
+                roc_scores = _oof_scores(clf_name, X_train, y_train,
+                         t_centers[train_mask], window_sec, step_sec)
 
                 stress_map[sig_name] = (t_centers, preds, scores)
                 per_sig[sig_name] = {
@@ -1059,13 +1110,22 @@ class AnalysisWindow(ctk.CTkFrame):
                     inner_row += 1
 
                 if "roc" in selected_plots:
-                    # ROC honesta: predicciones out-of-fold frente a las
-                    # etiquetas del protocolo. Si no hay datos suficientes para
-                    # la validacion cruzada (roc_scores None), se omite.
-                    if res["roc_scores"] is not None:
-                        fig = plot_roc(res["roc_y"], res["roc_scores"], sig_name)
-                        self._add_plot_in(content, f"ROC curve — {clf_name}", fig, inner_row)
-                        inner_row += 1
+                    rs = res.get("roc_scores")
+                    ry = res.get("roc_y")
+                    if rs is not None and ry is not None:
+                        rs = np.asarray(rs, dtype=float).ravel()
+                        ry = np.asarray(ry, dtype=int).ravel()
+                        n  = min(len(rs), len(ry))          # por si difieren
+                        rs, ry = rs[:n], ry[:n]
+                        m = ~np.isnan(rs)
+                        if m.sum() >= 2 and len(np.unique(ry[m])) == 2:
+                            fig = plot_roc(ry[m], rs[m], sig_name)
+                            self._add_plot_in(content,
+                                              f"ROC curve — {clf_name}", fig, inner_row)
+                            inner_row += 1
+                        else:
+                            self._set_status(
+                                f"ROC {sig_name}/{clf_name}: sin datos OOF suficientes.")
 
                 if "timeline" in selected_plots:
                     fig = _plot_stress_timeline(t_centers, preds, scores, sig_name,
