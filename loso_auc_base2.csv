@@ -1,6 +1,2 @@
-signal,auc_loso
-BVP,0.4853
-EDA,0.4393
-TEMP,0.4981
-ACC,0.4763
-HR,0.5198
+modelo,auc_loso
+todas_las_senales_fusionadas,0.6753
