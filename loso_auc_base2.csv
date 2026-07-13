@@ -1,7 +1,21 @@
-senal,auc_loso
+# AUC por sujeto (todas las senales fusionadas)
+sujeto,auc
+S1,0.4698
+S2,0.6107
+S3,0.6609
+S4,0.6774
+S5,0.8473
+S6,0.4444
+S7,0.2678
+S8,0.5701
+S9,0.2584
+S10,0.4337
+media,0.5241
+
+# AUC por senal (media sobre todos los sujetos)
+senal,auc
 BVP,0.5342
 EDA,0.4350
 TEMP,0.6326
 ACC,0.5442
 HR,0.4413
-todas_las_senales_fusionadas,0.5241

@@ -188,9 +188,9 @@ def _zscore_per_subject(X: np.ndarray) -> np.ndarray:
     return (X - mu) / sd
 
 
-def evaluate_signal(sig_name: str) -> float | None:
-    """LOSO-AUC por señal. Normaliza (z-score) por sujeto y por columna,
-    y promedia el AUC de cada sujeto (macro), NO un unico AUC agrupado."""
+def evaluate_signal(sig_name: str) -> dict | None:
+    """LOSO-AUC por señal. Normaliza (z-score) por sujeto y por columna.
+    Devuelve {n_sujeto: auc} (o None si no hay datos)."""
     X_list, y_list, g_list = [], [], []
 
     for num in range(1, N_SUBJECTS + 1):
@@ -242,12 +242,13 @@ def evaluate_signal(sig_name: str) -> float | None:
             proba[te] = pipe.predict_proba(X[te])[:, 1]
 
     # ── AUC POR SUJETO y luego media (macro), NO un unico AUC agrupado ─────────
-    aucs, detail = [], []
+    per_subj, aucs, detail = {}, [], []
     for subj in np.unique(g):
         m = g == subj
         if m.sum() < 2 or len(np.unique(y[m])) < 2:
             continue                    # sujeto sin las dos clases -> AUC indefinido
-        a = roc_auc_score(y[m], proba[m])
+        a = float(roc_auc_score(y[m], proba[m]))
+        per_subj[int(subj)] = a
         aucs.append(a)
         detail.append(f"S{int(subj)}={a:.2f}")
 
@@ -256,10 +257,10 @@ def evaluate_signal(sig_name: str) -> float | None:
 
     print(f"    [{sig_name}] por sujeto: " + "  ".join(detail))
     print(f"    [{sig_name}] media={np.mean(aucs):.3f}  sd={np.std(aucs):.3f}  n={len(aucs)}")
-    return float(np.mean(aucs))
+    return per_subj
 
 
-def evaluate_all() -> float | None:
+def evaluate_all() -> dict | None:
     """LOSO con TODAS las señales FUSIONADAS: un vector de características por
     ventana que concatena las features de cada señal. Da UN AUC por sujeto
     (todas las señales juntas) y promedia. Esto es lo que pide '1 por sujeto'."""
@@ -347,12 +348,13 @@ def evaluate_all() -> float | None:
             proba[te] = pipe.predict_proba(X[te])[:, 1]
 
     # ── UN AUC por sujeto (todas las señales) y luego media (macro) ────────────
-    aucs, detail = [], []
+    per_subj, aucs, detail = {}, [], []
     for subj in np.unique(g):
         m = g == subj
         if m.sum() < 2 or len(np.unique(y[m])) < 2:
             continue
-        a = roc_auc_score(y[m], proba[m])
+        a = float(roc_auc_score(y[m], proba[m]))
+        per_subj[int(subj)] = a
         aucs.append(a)
         detail.append(f"S{int(subj)}={a:.2f}")
 
@@ -362,7 +364,7 @@ def evaluate_all() -> float | None:
     print(f"  Señales fusionadas: {ordered}")
     print("  AUC por sujeto:  " + "  ".join(detail))
     print(f"  media={np.mean(aucs):.3f}  sd={np.std(aucs):.3f}  n={len(aucs)}")
-    return float(np.mean(aucs))
+    return per_subj
 
 
 def run_base(base: int) -> None:
@@ -385,15 +387,32 @@ def run_base(base: int) -> None:
     print("\n── AUC LOSO (todas las señales fusionadas) ────────────────────")
     auc_all = evaluate_all()
 
-    # 3) Guardado dependiente de BASE_NAME (Base1 y Base2 no se pisan)
+    # 3) Guardado dependiente de BASE_NAME (Base1 y Base2 no se pisan).
+    #    Dos secciones:
+    #      (A) AUC por sujeto -> modelo con TODAS las señales fusionadas
+    #      (B) AUC por señal  -> UN valor por señal (media sobre todos los sujetos)
     out = f"loso_auc_{BASE_NAME.lower()}.csv"
     with open(out, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["senal", "auc_loso"])
-        for sig, a in per_signal.items():
-            w.writerow([sig, f"{a:.4f}"])
+
+        # ── (A) AUC por sujeto (todas las señales fusionadas) ──────────────────
+        w.writerow(["# AUC por sujeto (todas las senales fusionadas)"])
+        w.writerow(["sujeto", "auc"])
         if auc_all is not None:
-            w.writerow(["todas_las_senales_fusionadas", f"{auc_all:.4f}"])
+            for n in range(1, N_SUBJECTS + 1):
+                v = auc_all.get(n)
+                w.writerow([f"S{n}", f"{v:.4f}" if v is not None else ""])
+            present = [v for v in auc_all.values()]
+            w.writerow(["media", f"{np.mean(present):.4f}" if present else ""])
+        w.writerow([])
+
+        # ── (B) AUC por señal (media sobre todos los sujetos) ──────────────────
+        w.writerow(["# AUC por senal (media sobre todos los sujetos)"])
+        w.writerow(["senal", "auc"])
+        for sig, per_subj in per_signal.items():
+            vals = [v for v in per_subj.values()]
+            w.writerow([sig, f"{np.mean(vals):.4f}" if vals else ""])
+
     print(f"\nGuardado en {out}")
 
 

@@ -1,8 +1,17 @@
-senal,auc_loso
+# AUC por sujeto (todas las senales fusionadas)
+sujeto,auc
+S1,0.9628
+S2,0.1934
+S3,0.9501
+S4,0.8387
+S5,0.4316
+media,0.6753
+
+# AUC por senal (media sobre todos los sujetos)
+senal,auc
 ECG,0.4549
 EDA,0.4339
 EMG,0.7442
 PPG,0.5288
 RESP,0.5098
 SKT,0.6179
-todas_las_senales_fusionadas,0.6753
