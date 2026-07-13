@@ -1,0 +1,8 @@
+senal,auc_loso
+ECG,0.4549
+EDA,0.4339
+EMG,0.7442
+PPG,0.5288
+RESP,0.5098
+SKT,0.6179
+todas_las_senales_fusionadas,0.6753

@@ -1,13 +1,18 @@
 """
-loso_eval_base2.py
-Evaluacion Leave-One-Subject-Out (LOSO) para la Base de datos 2 (Empatica).
+loso_eval.py
+Evaluacion Leave-One-Subject-Out (LOSO) para las dos bases de datos.
+
+Selecciona la base con la variable BASE:
+    BASE = 1  ->  Biopac    (5 sujetos)
+    BASE = 2  ->  Empatica  (10 sujetos)
 
 Entrena con N-1 sujetos y evalua en el sujeto excluido, rotando sobre todos.
 Reutiliza la extraccion de caracteristicas y el etiquetado por protocolo de
 models.py. NO modifica la aplicacion.
 
 Uso:
-    python loso_eval_base2.py
+    # cambia BASE = 1 o BASE = 2 abajo y ejecuta una vez por cada base
+    python loso_eval.py
 """
 
 from __future__ import annotations
@@ -26,85 +31,109 @@ from app.core.data_loader import load_subject_folder
 from app.core.models import extract_features_windowed, build_labels_from_intervals
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURACION — AJUSTA ESTO A TU CASO
+# Al ejecutar se evaluan LAS DOS bases seguidas (Biopac y Empatica).
+# No hay que elegir nada: salen los dos CSV en una sola ejecucion.
 # ─────────────────────────────────────────────────────────────────────────────
-BASE_FOLDER = r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1"      # r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1"
-BASE_NAME   = "Base1"                  # nombre base -> {BASE_NAME}_Sujeto{n} Base1
-DEVICE      = "Biopac" #Biopac o Empatica
-N_SUBJECTS  = 5 #5 o 10
-#SIGNALS     = ["BVP", "EDA", "TEMP", "ACC", "HR"]      #setup Empatica
-#FS_MAP      = {"BVP": 64, "EDA": 4, "TEMP": 4, "ACC": 32, "HR": 1}
 
-SIGNALS     = ["ECG", "EDA", "EMG", "PPG", "RESP", "SKT"]   # setup Biopac
-FS_MAP      = {"ECG": 2000, "EDA": 2000, "EMG": 2000, "PPG": 2000, "RESP": 2000, "SKT": 2000}
-WINDOW_SEC  = 60.0
-STEP_SEC    = 30.0
+# Parametros comunes a las dos bases
+WINDOW_SEC   = 60.0
+STEP_SEC     = 30.0
 APPLY_FILTER = True
 
-# Intervalos de estres (vexing) por sujeto, en segundos: {n_sujeto: (inicio, fin)}
-# Rellena con los tiempos reales de cada sujeto de la Base 2.
-VEXING = {
-    1:  (1613, 2579),
-    2:  (2268, 3233),
-    3:  (1519, 2461),
-    4:  (1689, 2642),
-    5:  (1793, 2761),
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURACION POR BASE
+# ─────────────────────────────────────────────────────────────────────────────
+CONFIGS = {
+    # ── Base 1 — Biopac — 5 sujetos ──────────────────────────────────────────
+    1: {
+        "BASE_FOLDER": r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base1",
+        "BASE_NAME":   "Base1",
+        "DEVICE":      "Biopac",
+        "N_SUBJECTS":  5,
+        "SIGNALS":     ["ECG", "EDA", "EMG", "PPG", "RESP", "SKT"],
+        "FS_MAP":      {"ECG": 2000, "EDA": 2000, "EMG": 2000,
+                        "PPG": 2000, "RESP": 2000, "SKT": 2000},
+        "VEXING": {
+            1: (1613, 2579),
+            2: (2268, 3233),
+            3: (1519, 2461),
+            4: (1689, 2642),
+            5: (1793, 2761),
+        },
+        "CALMING": {
+            1: (502, 1469),
+            2: (1166, 2127),
+            3: (425, 1374),
+            4: (582, 1505),
+            5: (669, 1638),
+        },
+    },
+
+    # ── Base 2 — Empatica — 10 sujetos ───────────────────────────────────────
+    2: {
+        "BASE_FOLDER": r"C:\Users\raque\Desktop\TFG\base de datos TFG\Base2",
+        "BASE_NAME":   "Base2",
+        "DEVICE":      "Empatica",
+        "N_SUBJECTS":  10,
+        "SIGNALS":     ["BVP", "EDA", "TEMP", "ACC", "HR"],
+        "FS_MAP":      {"BVP": 64, "EDA": 4, "TEMP": 4, "ACC": 32, "HR": 1},
+        "VEXING": {
+            1:  (2622, 3515),
+            2:  (2895, 3824),
+            3:  (2688, 3613),
+            4:  (3065, 4002),
+            5:  (2714, 3649),
+            6:  (2908, 3854),
+            7:  (3058, 3954),
+            8:  (2714, 3629),
+            9:  (2689, 3604),
+            10: (2709, 3655),
+        },
+        "CALMING": {
+            1:  (1336, 2234),
+            2:  (1582, 2506),
+            3:  (1372, 2299),
+            4:  (1738, 2664),
+            5:  (1376, 2319),
+            6:  (1531, 2476),
+            7:  (1744, 2646),
+            8:  (1382, 2318),
+            9:  (1379, 2296),
+            10: (1373, 2319),
+        },
+    },
 }
-# Intervalos de calming por sujeto (para acotar la ventana del protocolo).
-CALMING = {
-    1:  (502, 1469),
-    2:  (1166, 2127),
-    3:  (425, 1374),
-    4:  (582, 1505),
-    5:  (669, 1638),
-}
+
+# ── Nombres globales que usan las funciones de abajo (se rellenan por base) ───
+BASE        = None
+BASE_FOLDER = None
+BASE_NAME   = None
+DEVICE      = None
+N_SUBJECTS  = None
+SIGNALS     = None
+FS_MAP      = None
+VEXING      = None
+CALMING     = None
+
+
+def _apply_config(base: int) -> None:
+    """Vuelca la config de la base indicada a las variables globales que usan
+    las funciones de evaluacion. Permite recorrer las dos bases en una ejecucion."""
+    global BASE, BASE_FOLDER, BASE_NAME, DEVICE, N_SUBJECTS
+    global SIGNALS, FS_MAP, VEXING, CALMING
+    _SUBJECT_CACHE.clear()          # datos de la base anterior fuera
+    cfg         = CONFIGS[base]
+    BASE        = base
+    BASE_FOLDER = cfg["BASE_FOLDER"]
+    BASE_NAME   = cfg["BASE_NAME"]
+    DEVICE      = cfg["DEVICE"]
+    N_SUBJECTS  = cfg["N_SUBJECTS"]
+    SIGNALS     = cfg["SIGNALS"]
+    FS_MAP      = cfg["FS_MAP"]
+    VEXING      = cfg["VEXING"]
+    CALMING     = cfg["CALMING"]
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Intervalos de estres (vexing) por sujeto, en segundos: {n_sujeto: (inicio, fin)}
-#VEXING = {
-#    1:  (1613, 2579),
-#    2:  (2268, 3233),
-#    3:  (1519, 2461),
-#    4:  (1689, 2642),
-#    5:  (1793, 2761),
-#    1:  (2622, 3515),
-#    2:  (2895, 3824),
-#    3:  (2688, 3613),
-#    4:  (3065, 4002),
-#    5:  (2714, 3649),
-#    6:  (2908, 3854),
-#    7:  (3058, 3954),
-#    8:  (2714, 3629),
-#    9:  (2689, 3604),
-#    10: (2709, 3655),
-#}
-#CALMING = {
-#    1:  (1336, 2234),
-#    2:  (1582, 2506),
-#    3:  (1372, 2299),
-#    4:  (1738, 2664),
-#    5:  (1376, 2319),
-#    6:  (1531, 2476),
-#    7:  (1744, 2646),
-#    8:  (1382, 2318),
-#    9:  (1379, 2296),
-#    10: (1373, 2319),
-#}
-# Intervalos de calming por sujeto (para acotar la ventana del protocolo).
-#VEXING = {
-#    1:  (1613, 2579),
-#    2:  (2268, 3233),
-#    3:  (1519, 2461),
-#    4:  (1689, 2642),
-#    5:  (1793, 2761),
-#}
-#CALMING = {
-#    1:  (502, 1469),
-#    2:  (1166, 2127),
-#    3:  (425, 1374),
-#    4:  (582, 1505),
-#    5:  (669, 1638),
-#}
 
 def _subject_dir(num: int) -> str:
     return os.path.join(BASE_FOLDER, f"{BASE_NAME}_Sujeto{num}")
@@ -119,7 +148,14 @@ def _candidates(num: int) -> list[str]:
             os.path.join(d, "Empatica"), d]
 
 
+# Cache de sujetos ya cargados (para NO releer/refiltrar los CSV en cada señal).
+# Se vacia en _apply_config al cambiar de base.
+_SUBJECT_CACHE: dict[int, dict] = {}
+
+
 def _load_subject(num: int) -> dict:
+    if num in _SUBJECT_CACHE:                 # ya cargado en esta base -> reutiliza
+        return _SUBJECT_CACHE[num]
     for cand in _candidates(num):
         if os.path.isdir(cand):
             try:
@@ -127,9 +163,11 @@ def _load_subject(num: int) -> dict:
                     cand, DEVICE, SIGNALS, fs_map=dict(FS_MAP),
                     apply_filters=APPLY_FILTER)
                 if loaded:
+                    _SUBJECT_CACHE[num] = loaded
                     return loaded
             except Exception as e:
                 print(f"[SKIP] {cand}: {e}")
+    _SUBJECT_CACHE[num] = {}                   # cachea el fallo -> no reintenta cada señal
     return {}
 
 
@@ -140,6 +178,7 @@ def _make_pipeline():
         ("clf", RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)),
     ])
 
+
 def _zscore_per_subject(X: np.ndarray) -> np.ndarray:
     """Z-score POR COLUMNA usando la media/desv. del PROPIO sujeto.
     Elimina la linea base individual (clave para la generalizacion LOSO)."""
@@ -147,6 +186,7 @@ def _zscore_per_subject(X: np.ndarray) -> np.ndarray:
     sd = np.nanstd(X, axis=0)
     sd = np.where(sd == 0, 1.0, sd)      # columnas constantes -> no dividir por 0
     return (X - mu) / sd
+
 
 def evaluate_signal(sig_name: str) -> float | None:
     """LOSO-AUC por señal. Normaliza (z-score) por sujeto y por columna,
@@ -217,6 +257,7 @@ def evaluate_signal(sig_name: str) -> float | None:
     print(f"    [{sig_name}] por sujeto: " + "  ".join(detail))
     print(f"    [{sig_name}] media={np.mean(aucs):.3f}  sd={np.std(aucs):.3f}  n={len(aucs)}")
     return float(np.mean(aucs))
+
 
 def evaluate_all() -> float | None:
     """LOSO con TODAS las señales FUSIONADAS: un vector de características por
@@ -323,20 +364,44 @@ def evaluate_all() -> float | None:
     print(f"  media={np.mean(aucs):.3f}  sd={np.std(aucs):.3f}  n={len(aucs)}")
     return float(np.mean(aucs))
 
-def main():
-    print(f"LOSO evaluation — {DEVICE} — {N_SUBJECTS} sujetos — TODAS las señales\n")
-    auc = evaluate_all()
-    if auc is None:
-        print("Sin datos suficientes.")
-        return
-    print(f"\nAUC LOSO (todas las señales, media por sujeto) = {auc:.3f}")
 
-    out = "loso_auc_base2.csv"
+def run_base(base: int) -> None:
+    """Evalua una base completa (AUC por señal + fusionadas) y guarda su CSV."""
+    _apply_config(base)
+    print(f"\n{'='*70}")
+    print(f"LOSO evaluation — BASE {BASE} — {DEVICE} — {N_SUBJECTS} sujetos")
+    print(f"Carpeta: {BASE_FOLDER}")
+    print(f"{'='*70}\n")
+
+    # 1) AUC POR SEÑAL (tablas 6.5 / 6.6)
+    print("── AUC LOSO por señal ─────────────────────────────────────────")
+    per_signal = {}
+    for sig in SIGNALS:
+        auc_sig = evaluate_signal(sig)
+        if auc_sig is not None:
+            per_signal[sig] = auc_sig
+
+    # 2) AUC con TODAS las señales fusionadas
+    print("\n── AUC LOSO (todas las señales fusionadas) ────────────────────")
+    auc_all = evaluate_all()
+
+    # 3) Guardado dependiente de BASE_NAME (Base1 y Base2 no se pisan)
+    out = f"loso_auc_{BASE_NAME.lower()}.csv"
     with open(out, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["modelo", "auc_loso"])
-        w.writerow(["todas_las_senales_fusionadas", f"{auc:.4f}"])
+        w.writerow(["senal", "auc_loso"])
+        for sig, a in per_signal.items():
+            w.writerow([sig, f"{a:.4f}"])
+        if auc_all is not None:
+            w.writerow(["todas_las_senales_fusionadas", f"{auc_all:.4f}"])
     print(f"\nGuardado en {out}")
+
+
+def main():
+    # Recorre TODAS las bases definidas en CONFIGS (1 = Biopac, 2 = Empatica).
+    for base in sorted(CONFIGS):
+        run_base(base)
+    print("\nListo: generados los CSV de todas las bases.")
 
 
 if __name__ == "__main__":

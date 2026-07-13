@@ -1,2 +1,7 @@
-modelo,auc_loso
-todas_las_senales_fusionadas,0.6753
+senal,auc_loso
+BVP,0.5342
+EDA,0.4350
+TEMP,0.6326
+ACC,0.5442
+HR,0.4413
+todas_las_senales_fusionadas,0.5241
