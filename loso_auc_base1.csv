@@ -6,12 +6,13 @@ S3,0.9627
 S4,0.8446
 S5,0.4130
 media,0.6810
+sd,0.3100
 
-# AUC por senal (media sobre todos los sujetos)
-senal,auc
-ECG,0.4375
-EDA,0.4209
-EMG,0.7556
-PPG,0.5443
-RESP,0.5063
-SKT,0.6160
+# AUC por senal (media +/- sd sobre todos los sujetos)
+senal,auc_media,auc_sd
+ECG,0.4375,0.1047
+EDA,0.4209,0.1897
+EMG,0.7556,0.1505
+PPG,0.5443,0.1035
+RESP,0.5063,0.0956
+SKT,0.6160,0.1982

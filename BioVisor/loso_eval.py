@@ -396,7 +396,7 @@ def run_base(base: int) -> None:
     # 3) Guardado dependiente de BASE_NAME (Base1 y Base2 no se pisan).
     #    Dos secciones:
     #      (A) AUC por sujeto -> modelo con TODAS las señales fusionadas
-    #      (B) AUC por señal  -> UN valor por señal (media sobre todos los sujetos)
+    #      (B) AUC por señal  -> media +/- sd sobre todos los sujetos
     out = f"loso_auc_{BASE_NAME.lower()}.csv"
     with open(out, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -410,14 +410,17 @@ def run_base(base: int) -> None:
                 w.writerow([f"S{n}", f"{v:.4f}" if v is not None else ""])
             present = [v for v in auc_all.values()]
             w.writerow(["media", f"{np.mean(present):.4f}" if present else ""])
+            w.writerow(["sd",    f"{np.std(present):.4f}"  if present else ""])
         w.writerow([])
 
-        # ── (B) AUC por señal (media sobre todos los sujetos) ──────────────────
-        w.writerow(["# AUC por senal (media sobre todos los sujetos)"])
-        w.writerow(["senal", "auc"])
+        # ── (B) AUC por señal (media +/- sd sobre todos los sujetos) ───────────
+        w.writerow(["# AUC por senal (media +/- sd sobre todos los sujetos)"])
+        w.writerow(["senal", "auc_media", "auc_sd"])
         for sig, per_subj in per_signal.items():
             vals = [v for v in per_subj.values()]
-            w.writerow([sig, f"{np.mean(vals):.4f}" if vals else ""])
+            w.writerow([sig,
+                        f"{np.mean(vals):.4f}" if vals else "",
+                        f"{np.std(vals):.4f}"  if vals else ""])
 
     print(f"\nGuardado en {out}")
 
