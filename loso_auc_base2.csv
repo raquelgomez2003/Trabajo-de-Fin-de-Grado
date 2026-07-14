@@ -1,21 +1,21 @@
 # AUC por sujeto (todas las senales fusionadas)
 sujeto,auc
-S1,0.4698
-S2,0.6107
-S3,0.6609
-S4,0.6774
-S5,0.8473
-S6,0.4444
-S7,0.2678
-S8,0.5701
-S9,0.2584
-S10,0.4337
-media,0.5241
+S1,0.4512
+S2,0.6283
+S3,0.7141
+S4,0.7018
+S5,0.8918
+S6,0.4931
+S7,0.2597
+S8,0.5538
+S9,0.1679
+S10,0.3821
+media,0.5244
 
 # AUC por senal (media sobre todos los sujetos)
 senal,auc
-BVP,0.5342
-EDA,0.4350
-TEMP,0.6326
-ACC,0.5442
-HR,0.4413
+BVP,0.5595
+EDA,0.4558
+TEMP,0.6411
+ACC,0.5546
+HR,0.4381
